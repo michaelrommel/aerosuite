@@ -11,6 +11,8 @@ RUN setcap CAP_NET_BIND_SERVICE=+eip /workspace/aeroftp/target/release/aeroftp
 FROM alpine
 WORKDIR /aeroftp
 COPY --from=builder --chown=aeroftp:aeroftp /workspace/aeroftp/target/release/aeroftp .
+COPY --from=builder --chown=aeroftp:aeroftp /workspace/aeroftp/target/release/ecs_upload .
+COPY --from=builder --chown=aeroftp:aeroftp /workspace/aeroftp/target/release/s3_upload .
 # RUN apk add libcap-getcap
 RUN apk add libcap-utils
 COPY <<-EOT /aeroftp/credentials.json

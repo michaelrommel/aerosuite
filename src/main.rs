@@ -31,8 +31,8 @@ fn start_ftp(
     //     // Set the root path for all operations
     //     .root("/mrcan24/");
 
-    let region = env::var("AWS_S3_REGION").unwrap_or("eu-central-1".to_string());
-    let bucket = env::var("AWS_S3_BUCKET").unwrap_or("dev-nucleus-aeroftp".to_string());
+    let region = env::var("AWS_S3_REGION").unwrap_or("${REGION}".to_string());
+    let bucket = env::var("AWS_S3_BUCKET").unwrap_or("dev-s3-aeroftp".to_string());
 
     let builder = S3::default()
         .endpoint("https://s3.amazonaws.com")
