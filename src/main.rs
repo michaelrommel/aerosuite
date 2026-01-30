@@ -5,14 +5,7 @@ mod metrics;
 // use opendal::services::Azdls;
 use opendal::services::S3;
 use opendal::Operator;
-use std::{
-    // env,
-    net::SocketAddr,
-    process,
-    result::Result,
-    sync::Arc,
-    time::Duration,
-};
+use std::{env, net::SocketAddr, process, result::Result, sync::Arc, time::Duration};
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
 
@@ -38,10 +31,13 @@ fn start_ftp(
     //     // Set the root path for all operations
     //     .root("/mrcan24/");
 
+    let region = env::var("AWS_S3_REGION").unwrap_or("eu-central-1".to_string());
+    let bucket = env::var("AWS_S3_BUCKET").unwrap_or("dev-nucleus-aeroftp".to_string());
+
     let builder = S3::default()
         .endpoint("https://s3.amazonaws.com")
-        .region("eu-central-1")
-        .bucket("dev-nucleus-aeroftp")
+        .region(&region)
+        .bucket(&bucket)
         .root("/");
 
     // 2. Initialize the Operator
@@ -94,7 +90,7 @@ fn start_ftp(
 
     tokio::spawn(async move {
         // let addr = "[fc00:1234:0:0:13:0:0:13]:2121";
-        let addr = "[::]:2121";
+        let addr = "[::]:21";
         println!("Starting ftp server on {}", addr);
         if let Err(e) = server6.listen(addr).await {
             println!("FTP server error: {:?}", e)

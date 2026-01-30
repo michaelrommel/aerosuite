@@ -1317,7 +1317,6 @@ dependencies = [
  "md-5",
  "moka",
  "nix",
- "prettify_ip",
  "prometheus",
  "proxy-protocol",
  "redis",
@@ -1730,12 +1729,6 @@ checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
 ]
-
-[[package]]
-name = "prettify_ip"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d1a5f962c4c69a191c475a927723e79b17db2b3445fc98f7b00fdc03638fd6d"
 
 [[package]]
 name = "pretty_env_logger"

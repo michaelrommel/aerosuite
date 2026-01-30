@@ -1,0 +1,59 @@
+
+{
+	"agent": {
+		"debug": true,
+		"run_as_user": "cwagent"
+	},
+	"metrics": {
+		"metrics_collected": {
+			"mem": {
+				"measurement": [
+					"mem_used_percent"
+				]
+			},
+			"disk": {
+				"measurement": [
+					"used_percent"
+				],
+				"resources": [
+					"*"
+				]
+			},
+			"net": {
+				"measurement": [
+					"bytes_sent",
+					"bytes_recv",
+					"packets_sent",
+					"packets_recv"
+				],
+				"resources": [
+					"*"
+				]
+			}
+		},
+		"append_dimensions": {
+			"ImageId": "${aws:ImageId}",
+			"InstanceId": "${aws:InstanceId}",
+			"InstanceType": "${aws:InstanceType}",
+			"AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+		}
+	},
+	"logs": {
+		"metrics_collected": {
+			"prometheus": {
+				"log_group_name":"Prometheus",
+				"prometheus_config_path": "/etc/cwagent/prometheus.yaml",
+				"emf_processor": {
+					"metric_declaration": [
+						{
+							"source_labels": ["job"],
+							"label_matcher": "^aeroftp$",
+							"dimensions": [["instance"]],
+							"metric_selectors": [".*"]
+						}
+					]
+				}
+			}
+		}
+	}
+}
