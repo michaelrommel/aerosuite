@@ -30,3 +30,9 @@ prometheus = { version = "0.14.0", features = ["process"] }
 [dependency-overrides]
 # rustls = { version = "0.23.36", default-features = false, features = ["aws-lc-rs", "logging", "prefer-post-quantum", "std", "tls12", "aws_lc_rs"] }
 
+[profile.release]
+strip = true      # Automatically strip symbols
+lto = true        # Link-time optimization
+opt-level = "s"   # Optimize for size
+codegen-units = 1 # Better optimization at the cost of compile time
+
