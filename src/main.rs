@@ -1,21 +1,45 @@
-use std::io::Cursor;
-use std::sync::Arc;
-use std::time::Instant;
-// use suppaftp::FtpStream;
-use suppaftp::Mode;
-use suppaftp::tokio::AsyncFtpStream;
-use tokio::task::JoinSet;
-use tokio::time::{Duration, sleep};
+use rand::Rng;
+use std::{env, io::Error, time::Instant};
+use suppaftp::{tokio::AsyncFtpStream, types::Mode};
+use tokio::{
+    fs::File,
+    io::{AsyncWriteExt, BufWriter},
+    task::JoinSet,
+    time::{Duration, sleep},
+};
 
-async fn write_async(filename: String, buffer: &Vec<u8>) -> tokio::io::Result<()> {
-    // let mut ftp_stream = AsyncFtpStream::connect("172.17.2.23:2121").await.unwrap();
-    let mut ftp_stream = AsyncFtpStream::connect("[fc00:1234:0:0:13:0:0:13]:2121")
-        .await
-        .unwrap();
-    ftp_stream.login("rdiagftp", "siemens").await.unwrap();
+async fn setup_files() -> Result<(), Error> {
+    let file_path = "mediumfile.dat";
+    let target_size: u32 = 100 * 1024 * 1024;
+    let mut current_size: u32 = 0;
+
+    let file = File::create(file_path).await?;
+    let mut writer = BufWriter::new(file);
+    let mut rng = rand::rng();
+
+    // Using a buffer to speed up writing for large files
+    const CHUNK_SIZE: u32 = 8192;
+    let mut buffer = [0u8; CHUNK_SIZE as usize];
+
+    while current_size < target_size {
+        let remaining: u32 = target_size - current_size;
+        let to_write: u32 = std::cmp::min(remaining, CHUNK_SIZE);
+
+        rng.fill(&mut buffer);
+
+        writer.write_all(&buffer[..to_write as usize]).await?;
+        current_size += to_write;
+    }
+
+    writer.flush().await
+}
+
+async fn write_async(filename: String, destination: String) -> tokio::io::Result<()> {
+    let mut ftp_stream = AsyncFtpStream::connect(destination).await.unwrap();
     ftp_stream.set_mode(Mode::ExtendedPassive);
-    let mut reader = Cursor::new(buffer);
-    // let mut reader = File::open("mediumfile.dat").await?;
+    ftp_stream.login("test", "secret").await.unwrap();
+    // let mut reader = Cursor::new("Hello from the Rust \"suppaftp\" crate!".as_bytes());
+    let mut reader = File::open("mediumfile.dat").await?;
     let _ = ftp_stream
         .put_file(filename.clone(), &mut reader)
         .await
@@ -41,23 +65,27 @@ async fn write_async(filename: String, buffer: &Vec<u8>) -> tokio::io::Result<()
 
 #[tokio::main]
 async fn main() {
-    // write_sync();
-
-    // read a file into memory
-    let buffer = Arc::new(tokio::fs::read("mediumfile.dat").await.unwrap());
+    setup_files().await.unwrap();
 
     let mut set = JoinSet::new();
     let start_time = Instant::now();
+    let target = env::var("AEROSTRESS_TARGET").unwrap_or("127.0.0.1".to_string());
+    let parallel = env::var("AEROSTRESS_TASKS").unwrap_or("10".to_string());
+    let p: i32 = parallel.parse().expect("TASK parameter is not a number");
 
-    println!("Starting xxx parallel tasks...");
+    println!("Starting {} parallel tasks...", p);
 
-    for i in 0..100 {
-        let content_ref = Arc::clone(&buffer);
+    for i in 1..=p {
+        // clone and make destination movable
+        let destination = format!("{}:21", target.clone());
+        // create an arbitraty start delay for inside the task
+        let delay = rand::random_range(1..=75) / 100;
+        // start the task immediately
         set.spawn(async move {
-            let f = format!("greeting_{:04}.txt", i);
-            let _ = write_async(f, &content_ref).await;
-            // let delay = rand::random_range(1..5) / 10;
-            // sleep(Duration::from_secs(delay)).await;
+            // wait inside the task before starting the ftp transfer
+            sleep(Duration::from_secs(delay)).await;
+            let f = format!("testfile_{:04}.txt", i);
+            write_async(f, destination).await.unwrap();
             println!("Task {} finished.", i);
         });
     }
