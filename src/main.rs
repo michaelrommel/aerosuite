@@ -3,13 +3,63 @@ mod metrics;
 
 // use anyhow::Result;
 // use opendal::services::Azdls;
-use opendal::services::S3;
-use opendal::Operator;
-use std::{env, net::SocketAddr, process, result::Result, sync::Arc, time::Duration};
+use aws_config::BehaviorVersion;
+use chrono::{TimeZone, Utc};
+use opendal::{services::S3, Operator};
+use reqsign::AwsCredential;
+use reqwest::Client;
+use std::{
+    boxed::Box,
+    // collections::HashMap,
+    env,
+    net::SocketAddr,
+    process,
+    result::Result,
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
 
-// use console_subscriber;
+use aws_config::meta::region::RegionProviderChain;
+use aws_credential_types::provider::ProvideCredentials;
+use aws_types::SdkConfig;
+
+struct AwsCredentialLoad;
+
+#[async_trait::async_trait]
+impl reqsign::AwsCredentialLoad for AwsCredentialLoad {
+    async fn load_credential(&self, _client: Client) -> anyhow::Result<Option<AwsCredential>> {
+        println!("Loading AWS credentials");
+        let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
+
+        let config: SdkConfig = aws_config::defaults(BehaviorVersion::v2026_01_12())
+            .region(region_provider)
+            .load()
+            .await;
+
+        if let Some(creds_provider) = config.credentials_provider() {
+            let credentials = creds_provider.provide_credentials().await?;
+            let duration = credentials
+                .expiry()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime is before UNIX_EPOCH");
+            let expiry = Utc
+                .timestamp_opt(duration.as_secs() as i64, duration.subsec_nanos())
+                .single();
+            println!("AWS Token expires at: {:?}", expiry);
+            return Ok(Some(AwsCredential {
+                access_key_id: credentials.access_key_id().to_string(),
+                secret_access_key: credentials.secret_access_key().to_string(),
+                session_token: credentials.session_token().map(|s| s.to_string()),
+                // OpenDAL will handle the actual signing; we just provide the keys
+                expires_in: expiry,
+            }));
+        }
+        Ok(None)
+    }
+}
 
 fn start_ftp(
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
@@ -35,6 +85,7 @@ fn start_ftp(
     let bucket = env::var("AWS_S3_BUCKET").unwrap_or("dev-s3-aeroftp".to_string());
 
     let builder = S3::default()
+        .customized_credential_load(Box::new(AwsCredentialLoad))
         .endpoint("https://s3.amazonaws.com")
         .region(&region)
         .bucket(&bucket)
@@ -73,6 +124,7 @@ fn start_ftp(
             libunftp::options::Shutdown::new().grace_period(Duration::from_secs(11))
         })
         .passive_host(libunftp::options::PassiveHost::FromConnection)
+        .passive_ports(40000..=49999)
         .metrics()
         .build()
         .map_err(|e| format!("Could not build server: {}", e))?;
