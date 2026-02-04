@@ -1,4 +1,6 @@
 #!/bin/sh
-./aerostress
-echo Sleeping now
+if [ ! "${AEROSTRESS_INTERACTIVE}" = "true" ]; then
+	./aerostress
+	echo Sleeping now
+fi
 sleep infinity

@@ -1,5 +1,6 @@
+use anyhow::{Context, Result};
 use rand::Rng;
-use std::{env, io::Error, time::Instant};
+use std::{env, time::Instant};
 use suppaftp::{tokio::AsyncFtpStream, types::Mode};
 use tokio::{
     fs::File,
@@ -8,12 +9,18 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-async fn setup_files() -> Result<(), Error> {
+async fn setup_files() -> Result<u32> {
+    let filesize = env::var("AEROSTRESS_SIZE").unwrap_or("10".to_string());
+    let s: u32 = filesize
+        .parse()
+        .expect("AEROSTRESS_SIZE parameter is not a number");
     let file_path = "mediumfile.dat";
-    let target_size: u32 = 100 * 1024 * 1024;
+    let target_size: u32 = s * 1024 * 1024;
     let mut current_size: u32 = 0;
 
-    let file = File::create(file_path).await?;
+    let file = File::create(file_path)
+        .await
+        .context("Temporary file could not be created.")?;
     let mut writer = BufWriter::new(file);
     let mut rng = rand::rng();
 
@@ -27,26 +34,43 @@ async fn setup_files() -> Result<(), Error> {
 
         rng.fill(&mut buffer);
 
-        writer.write_all(&buffer[..to_write as usize]).await?;
+        writer
+            .write_all(&buffer[..to_write as usize])
+            .await
+            .context("Chunk could not be written")?;
         current_size += to_write;
     }
+    writer
+        .flush()
+        .await
+        .context("Temporary file could not be flushed to disk")?;
 
-    writer.flush().await
+    Ok(current_size)
 }
 
-async fn write_async(filename: String, destination: String) -> tokio::io::Result<()> {
-    let mut ftp_stream = AsyncFtpStream::connect(destination).await.unwrap();
+async fn write_async(batch: i32, num: i32, filename: String, destination: String) -> Result<u64> {
+    let mut ftp_stream = AsyncFtpStream::connect(destination)
+        .await
+        .context("FTP Stream could not connect to server")?;
+    println!("Stream {}-{} connected to FTP server", batch, num);
     ftp_stream.set_mode(Mode::ExtendedPassive);
-    ftp_stream.login("test", "secret").await.unwrap();
+    ftp_stream
+        .login("test", "secret")
+        .await
+        .context("Login to FTP server failed")?;
+    println!("Stream {}-{} logged in successfully", batch, num);
     // let mut reader = Cursor::new("Hello from the Rust \"suppaftp\" crate!".as_bytes());
-    let mut reader = File::open("mediumfile.dat").await?;
-    let _ = ftp_stream
+    let mut reader = File::open("mediumfile.dat")
+        .await
+        .context("Source file could not be opened")?;
+    println!("Stream {}-{} read source file", batch, num);
+    let bytes_written = ftp_stream
         .put_file(filename.clone(), &mut reader)
         .await
-        .unwrap();
-    println!("Successfully wrote {}", filename);
-    ftp_stream.quit().await.unwrap();
-    Ok(())
+        .context("File could not be sent to FTP server")?;
+    println!("Stream {}-{} successfully wrote {}", batch, num, filename);
+    ftp_stream.quit().await?;
+    Ok(bytes_written)
 }
 
 // fn write_sync() {
@@ -64,41 +88,71 @@ async fn write_async(filename: String, destination: String) -> tokio::io::Result
 // }
 
 #[tokio::main]
-async fn main() {
-    setup_files().await.unwrap();
+async fn main() -> Result<()> {
+    println!("Creating temporary file to send");
+    let file_size = setup_files().await?;
+    println!("File created, {} bytes", file_size);
 
-    let mut set = JoinSet::new();
+    let mut set: JoinSet<Result<u64>> = JoinSet::new();
     let start_time = Instant::now();
     let target = env::var("AEROSTRESS_TARGET").unwrap_or("127.0.0.1".to_string());
-    let parallel = env::var("AEROSTRESS_TASKS").unwrap_or("10".to_string());
-    let p: i32 = parallel.parse().expect("TASK parameter is not a number");
+    let batches = env::var("AEROSTRESS_BATCHES").unwrap_or("8".to_string());
+    let b: i32 = batches
+        .parse()
+        .expect("AEROSTRESS_BATCHES parameter is not a number");
+    let parallel = env::var("AEROSTRESS_TASKS").unwrap_or("20".to_string());
+    let p: i32 = parallel
+        .parse()
+        .expect("AEROSTRESS_TASKS parameter is not a number");
+    let delay = env::var("AEROSTRESS_DELAY").unwrap_or("10".to_string());
+    let d: u64 = delay
+        .parse()
+        .expect("AEROSTRESS_DELAY parameter is not a number");
 
-    println!("Starting {} parallel tasks...", p);
-
-    for i in 1..=p {
-        // clone and make destination movable
-        let destination = format!("{}:21", target.clone());
-        // create an arbitraty start delay for inside the task
-        let delay = rand::random_range(1..=75) / 100;
-        // start the task immediately
-        set.spawn(async move {
-            // wait inside the task before starting the ftp transfer
-            sleep(Duration::from_secs(delay)).await;
-            let f = format!("testfile_{:04}.txt", i);
-            write_async(f, destination).await.unwrap();
-            println!("Task {} finished.", i);
-        });
+    // ramp up the load in steps of batches
+    for j in 1..=b {
+        println!("Starting {} parallel tasks...", p);
+        for i in 1..=p {
+            // clone and make destination movable
+            let destination = format!("{}:21", target.clone());
+            // create an arbitrary start delay for inside the task
+            let delay = rand::random_range(1..=75) / 100;
+            // start the task immediately
+            set.spawn(async move {
+                // wait inside the task before starting the ftp transfer
+                sleep(Duration::from_secs(delay)).await;
+                let f = format!("testfile_{:02}_{:04}.txt", j, i);
+                let bytes_written = write_async(j, i, f, destination).await?;
+                println!(
+                    "Task {} finished, {:.3} MBytes",
+                    i,
+                    bytes_written / 1024 / 1024
+                );
+                Ok(bytes_written)
+            });
+        }
+        println!("Batch {} spawned in {:?} seconds", j, start_time.elapsed(),);
+        // create a delay between batches
+        sleep(Duration::from_secs(d)).await;
     }
 
+    let mut sum_bytes = 0;
     // Wait for all spawned tasks to finish
     while let Some(res) = set.join_next().await {
-        if let Err(e) = res {
-            eprintln!("A task failed: {:?}", e);
+        match res {
+            Ok(taskresult) => match taskresult {
+                Ok(b) => sum_bytes += b,
+                Err(e) => eprintln!("A write task failed: {:?}", e),
+            },
+            Err(e) => eprintln!("A JoinHandle failed: {:?}", e),
         }
     }
 
     println!(
-        "All tasks joined. Total elapsed time: {:?}",
-        start_time.elapsed()
+        "All tasks joined. Total elapsed time: {:?}, total GB: {:?}",
+        start_time.elapsed(),
+        sum_bytes / 1024 / 1024 / 1024
     );
+
+    Ok(())
 }
