@@ -34,14 +34,14 @@ pub async fn start(
     loop {
         tokio::select! {
             conn = listener.accept() => {
-                let (stream, peer_addr) = match conn {
+                let (stream, _peer_addr) = match conn {
                     Ok(conn) => conn,
                     Err(e) => {
                         println!("Accept error: {}", e);
                         continue;
                     }
                 };
-                println!("Incoming connection accepted: {}", peer_addr);
+                // println!("Incoming connection accepted: {}", peer_addr);
 
                 let stream = hyper_util::rt::TokioIo::new(stream);
 
@@ -56,7 +56,7 @@ pub async fn start(
                     if let Err(err) = conn.await {
                         println!("connection error: {}", err);
                     }
-                    println!("connection dropped: {}", peer_addr);
+                    // println!("connection dropped: {}", peer_addr);
                 });
             },
             _ = shutdown.recv() => {

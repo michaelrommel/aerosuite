@@ -15,6 +15,13 @@ COPY --from=builder --chown=aeroftp:aeroftp /workspace/aeroftp/target/release/ec
 # COPY --from=builder --chown=aeroftp:aeroftp /workspace/aeroftp/target/release/s3_upload .
 # RUN apk add libcap-getcap
 RUN apk add libcap-utils
+RUN apk add procps-ng
+RUN apk add coreutils
+RUN apk add jq
+COPY aeroftp/scripts/track_mem.sh ./scripts/
+COPY aeroftp/scripts/track_conn.sh ./scripts/
+COPY aeroftp/scripts/track_cpu.sh ./scripts/
+COPY aeroftp/scripts/stats.sh ./scripts/
 COPY <<-EOT /aeroftp/credentials.json
 [
 	{ "username": "test", "password": "secret" }
