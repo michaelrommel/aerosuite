@@ -8,6 +8,8 @@ use tokio::{
     task::JoinSet,
     time::{Duration, sleep},
 };
+use tokio_stream::StreamExt;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 async fn setup_files() -> Result<u32> {
     let filesize = env::var("AEROSTRESS_SIZE").unwrap_or("10".to_string());
@@ -48,26 +50,49 @@ async fn setup_files() -> Result<u32> {
     Ok(current_size)
 }
 
-async fn write_async(batch: i32, num: i32, filename: String, destination: String) -> Result<u64> {
+async fn write_async(
+    batch: i32,
+    num: i32,
+    filename: String,
+    destination: String,
+    brake: u64,
+) -> Result<u64> {
     let mut ftp_stream = AsyncFtpStream::connect(destination)
         .await
-        .context("FTP Stream could not connect to server")?;
+        .with_context(|| format!("FTP Stream {}-{} could not connect to server", batch, num))?;
     println!("Stream {}-{} connected to FTP server", batch, num);
     ftp_stream.set_mode(Mode::ExtendedPassive);
     ftp_stream
         .login("test", "secret")
         .await
-        .context("Login to FTP server failed")?;
+        .with_context(|| format!("Login of Stream {}-{} to the FTP server failed", batch, num))?;
     println!("Stream {}-{} logged in successfully", batch, num);
     // let mut reader = Cursor::new("Hello from the Rust \"suppaftp\" crate!".as_bytes());
-    let mut reader = File::open("mediumfile.dat")
+    let mut file = File::open("mediumfile.dat")
         .await
-        .context("Source file could not be opened")?;
+        .with_context(|| format!("Source file {}-{} could not be opened", batch, num))?;
     println!("Stream {}-{} read source file", batch, num);
-    let bytes_written = ftp_stream
-        .put_file(filename.clone(), &mut reader)
-        .await
-        .context("File could not be sent to FTP server")?;
+
+    let bytes_written: u64;
+    if brake > 0 {
+        let reader_stream = ReaderStream::with_capacity(file, 32 * 1024);
+        let throttled_reader = reader_stream.throttle(Duration::from_millis(brake));
+        let async_reader = StreamReader::new(throttled_reader);
+        tokio::pin!(async_reader);
+        let mut data_stream = ftp_stream.put_with_stream(filename.clone()).await?;
+        bytes_written = tokio::io::copy(&mut async_reader, &mut data_stream)
+            .await
+            .with_context(|| format!("File {}-{} could not be streamed", batch, num))?;
+        ftp_stream
+            .finalize_put_stream(data_stream)
+            .await
+            .with_context(|| format!("File {}-{} could not be finalized", batch, num))?;
+    } else {
+        bytes_written = ftp_stream
+            .put_file(filename.clone(), &mut file)
+            .await
+            .with_context(|| format!("File {}-{} could not be sent", batch, num))?;
+    }
     println!("Stream {}-{} successfully wrote {}", batch, num, filename);
     ftp_stream.quit().await?;
     Ok(bytes_written)
@@ -108,6 +133,12 @@ async fn main() -> Result<()> {
     let d: u64 = delay
         .parse()
         .expect("AEROSTRESS_DELAY parameter is not a number");
+    let brake = env::var("AEROSTRESS_THROTTLE").unwrap_or("0".to_string());
+    let t: u64 = brake
+        .parse()
+        .expect("AEROSTRESS_THROTTLE parameter is not a number");
+
+    let mut error_count: u64 = 0;
 
     // ramp up the load in steps of batches
     for j in 1..=b {
@@ -122,7 +153,7 @@ async fn main() -> Result<()> {
                 // wait inside the task before starting the ftp transfer
                 sleep(Duration::from_secs(delay)).await;
                 let f = format!("testfile_{:02}_{:04}.txt", j, i);
-                let bytes_written = write_async(j, i, f, destination).await?;
+                let bytes_written = write_async(j, i, f, destination, t).await?;
                 println!(
                     "Task {} finished, {:.3} MBytes",
                     i,
@@ -131,7 +162,11 @@ async fn main() -> Result<()> {
                 Ok(bytes_written)
             });
         }
-        println!("Batch {} spawned in {:?} seconds", j, start_time.elapsed(),);
+        println!(
+            "Batch {} spawned {:?} seconds after start",
+            j,
+            start_time.elapsed(),
+        );
         // create a delay between batches
         sleep(Duration::from_secs(d)).await;
     }
@@ -142,16 +177,20 @@ async fn main() -> Result<()> {
         match res {
             Ok(taskresult) => match taskresult {
                 Ok(b) => sum_bytes += b,
-                Err(e) => eprintln!("A write task failed: {:?}", e),
+                Err(e) => {
+                    eprintln!("A write task failed: {:?}", e);
+                    error_count += 1;
+                }
             },
             Err(e) => eprintln!("A JoinHandle failed: {:?}", e),
         }
     }
 
     println!(
-        "All tasks joined. Total elapsed time: {:?}, total GB: {:?}",
+        "All tasks joined. Total elapsed time: {:?}, total GB: {:?}, errors: {}",
         start_time.elapsed(),
-        sum_bytes / 1024 / 1024 / 1024
+        sum_bytes / 1024 / 1024 / 1024,
+        error_count
     );
 
     Ok(())
