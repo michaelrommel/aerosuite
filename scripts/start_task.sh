@@ -26,10 +26,11 @@ for i in {1..1}; do
 				\"environment\": [
 					{\"name\": \"AEROSTRESS_DELAY\", \"value\": \"5\"},
 					{\"name\": \"AEROSTRESS_BATCHES\", \"value\": \"1\"},
-					{\"name\": \"AEROSTRESS_TASKS\", \"value\": \"100\"},
+					{\"name\": \"AEROSTRESS_TASKS\", \"value\": \"10\"},
 					{\"name\": \"AEROSTRESS_TARGET\", \"value\": \"${TARGET}\"},
-					{\"name\": \"AEROSTRESS_SIZE\", \"value\": \"100\"},
-					{\"name\": \"AEROSTRESS_THROTTLE\", \"value\": \"50\"}
+					{\"name\": \"AEROSTRESS_SIZE\", \"value\": \"18\"},
+					{\"name\": \"AEROSTRESS_THROTTLE\", \"value\": \"8192\"},
+					{\"name\": \"AEROSTRESS_CHUNK\", \"value\": \"4096\"}
 				]
 			}]
 		}"
