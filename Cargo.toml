@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.100"
 suppaftp = { version = "8", features = ["tokio"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "time", "io-util"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
-tokio-stream = "0.1.18"
+tokio-stream = { version = "0.1.18", features = ["time"] }
 rand = "0.9.2"
