@@ -56,6 +56,7 @@ async fn write_async(
     filename: String,
     destination: String,
     brake: u64,
+    chunk: u64,
 ) -> Result<u64> {
     let mut ftp_stream = AsyncFtpStream::connect(destination)
         .await
@@ -75,7 +76,7 @@ async fn write_async(
 
     let bytes_written: u64;
     if brake > 0 {
-        let reader_stream = ReaderStream::with_capacity(file, 32 * 1024);
+        let reader_stream = ReaderStream::with_capacity(file, (chunk * 1024) as usize);
         let throttled_reader = reader_stream.throttle(Duration::from_millis(brake));
         let async_reader = StreamReader::new(throttled_reader);
         tokio::pin!(async_reader);
@@ -137,6 +138,10 @@ async fn main() -> Result<()> {
     let t: u64 = brake
         .parse()
         .expect("AEROSTRESS_THROTTLE parameter is not a number");
+    let chunk = env::var("AEROSTRESS_CHUNK").unwrap_or("4".to_string());
+    let c: u64 = chunk
+        .parse()
+        .expect("AEROSTRESS_CHUNK parameter is not a number");
 
     let mut error_count: u64 = 0;
 
@@ -153,7 +158,7 @@ async fn main() -> Result<()> {
                 // wait inside the task before starting the ftp transfer
                 sleep(Duration::from_secs(delay)).await;
                 let f = format!("testfile_{:02}_{:04}.txt", j, i);
-                let bytes_written = write_async(j, i, f, destination, t).await?;
+                let bytes_written = write_async(j, i, f, destination, t, c).await?;
                 println!(
                     "Task {} finished, {:.3} MBytes",
                     i,
