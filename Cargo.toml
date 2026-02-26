@@ -1,0 +1,22 @@
+[package]
+name = "tasks"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "copilot"
+path = "src/copilot.rs"
+
+[dependencies]
+ureq = { version = "3.2", default-features = false, features = ["json", "platform-verifier", "rustls-no-provider", "_ring"] }
+aws-sigv4 = { version = "1.4", features = ["sign-http"] }
+aws-credential-types = "1.2" # Required by aws-sigv4 to hold keys
+chrono = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = "0.13"
+prometheus-parse = "0.2"
+metrics = "0.24"
+metrics_cloudwatch_embedded = "0.10"
