@@ -1,144 +1,255 @@
-use aws_credential_types::Credentials;
-use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
-use aws_sigv4::sign::v4;
+use anyhow::Result;
+use anyhow::{Context, Error, anyhow};
+use http::{Method, Request};
+use reqsign::Context as ReqsignContext;
+use reqsign::ProvideCredential;
+use reqsign::aws;
 use serde::Deserialize;
-use std::env;
-use std::time::SystemTime;
-// use tracing_subscriber::EnvFilter;
+use sha2::{Digest, Sha256};
+
+use aws_credential_types::Credentials;
+use chrono::{DateTime, TimeZone, Utc};
 use metrics::{counter, gauge};
 use metrics_cloudwatch_embedded::Builder;
 use prometheus_parse::Scrape;
-use std::time::Duration;
-use ureq::{
-    Agent,
-    tls::{RootCerts, TlsConfig},
+use reqwest::Client;
+use std::{
+    boxed::Box,
+    collections::HashMap,
+    env,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::RwLock;
 
-#[derive(Deserialize)]
+use tracing_subscriber::EnvFilter;
+
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "PascalCase")]
-pub struct ResponseBody {
-    pub instances: Vec<Instance>,
+struct AwsCreds {
+    // this is the structure of the AWS Metadata Service response
+    #[allow(dead_code)]
+    role_arn: String,
+    access_key_id: String,
+    secret_access_key: String,
+    token: String,
+    expiration: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+impl AwsCreds {
+    // this allows us to get the expiry as a time from the string
+    pub fn expiry(&self) -> Option<SystemTime> {
+        if self.expiration.is_empty() {
+            None
+        } else {
+            Some(
+                DateTime::parse_from_rfc3339(&self.expiration)
+                    .unwrap()
+                    .into(),
+            )
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CachingAwsCredentialLoader {
+    // this is a reference that can be shared across async tasks
+    credentials: Arc<RwLock<AwsCreds>>,
+}
+
+impl CachingAwsCredentialLoader {
+    pub fn new() -> Self {
+        Self {
+            credentials: Arc::new(RwLock::new(AwsCreds::default())),
+        }
+    }
+
+    async fn check_cache(&self) -> Option<AwsCreds> {
+        // this function is the read lock block
+        let cached_credentials = self.credentials.read().await;
+        if let Some(expiry) = cached_credentials.expiry() {
+            // println!("Credentials were cached, expiry is {:?}", expiry);
+            match expiry.duration_since(SystemTime::now()) {
+                Ok(n) => {
+                    // println!("Credentials expire in {}", n.as_secs());
+                    if n < Duration::from_secs(15 * 60) {
+                        None
+                    } else {
+                        Some(cached_credentials.clone())
+                    }
+                }
+                Err(_) => {
+                    println!("Credentials are expired");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    async fn get_ecs_credentials(&self) -> Result<AwsCreds, Error> {
+        match env::var("AWS_SESSION_TOKEN") {
+            Ok(token) => Ok(AwsCreds {
+                role_arn: "unused".to_string(),
+                access_key_id: env::var("AWS_ACCESS_KEY_ID")?,
+                secret_access_key: env::var("AWS_SECRET_ACCESS_KEY")?,
+                token: token.to_string(),
+                expiration: env::var("AWS_TOKEN_EXPIRATION")?,
+            }),
+            Err(_) => {
+                let url = if let Ok(full_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+                {
+                    Some(full_uri)
+                } else if let Ok(rel_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+                {
+                    Some(format!("http://169.254.170.2{}", rel_uri))
+                } else {
+                    None
+                };
+                match url {
+                    Some(url) => {
+                        // println!("Fetching from {}", url);
+                        let client = reqwest::Client::new();
+                        client
+                            .get(url)
+                            .send()
+                            .await
+                            .context("Could not fetch metadata info")?
+                            .json::<AwsCreds>()
+                            .await
+                            .context("Failed to parse credentials")
+                    }
+                    None => Err(anyhow!("No ECS URI set")),
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProvideCredential for CachingAwsCredentialLoader {
+    type Credential = reqsign::aws::Credential;
+
+    async fn provide_credential<'a, 'b>(
+        &'a self,
+        _ctx: &'b ReqsignContext,
+    ) -> Result<Option<Self::Credential>, reqsign::Error>
+    where
+        Self: 'a,
+    {
+        let credentials: AwsCreds;
+        match self.check_cache().await {
+            Some(c) => credentials = c,
+            None => {
+                credentials = self.get_ecs_credentials().await?;
+                // This creates a write lock block
+                {
+                    let mut credential_cache = self.credentials.write().await;
+                    *credential_cache = credentials.clone();
+                    println!(
+                        "New credentials fetched and cached, expire at {:?}",
+                        credentials.expiry()
+                    );
+                }
+            }
+        }
+        let duration = credentials
+            .expiry()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime is before UNIX_EPOCH");
+        let expiry = Utc
+            .timestamp_opt(duration.as_secs() as i64, duration.subsec_nanos())
+            .single();
+        // struct AwsCredential is what the reqsign crate expects
+        Ok(Some(Self::Credential {
+            access_key_id: credentials.access_key_id.clone(),
+            secret_access_key: credentials.secret_access_key.clone(),
+            session_token: Some(credentials.token.clone()),
+            expires_in: expiry,
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DiscoverInstancesResponse {
+    pub instances: Vec<Instance>,
+    pub instances_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Instance {
-    pub _id: String,
-    pub attributes: Attributes,
+    pub instance_id: String,
+    pub namespace_name: String,
+    pub service_name: String,
+    pub health_status: String,
+    pub attributes: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "PascalCase")]
-pub struct Attributes {
-    #[serde(rename = "AWS_INSTANCE_IPV4")]
-    pub aws_instance_ipv4: String,
-
-    #[serde(rename = "AWS_INSTANCE_PORT")]
-    pub _aws_instance_port: String,
-
-    pub _availability_zone: String,
-    pub _deployment_id: String,
-}
-
-fn get_endpoints() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn get_endpoints(
+    credential_loader: CachingAwsCredentialLoader,
+) -> Result<Vec<String>, Error> {
     // tracing_subscriber::fmt()
     //     .with_env_filter(EnvFilter::new("trace"))
     //     .init();
 
-    let identity = Credentials::new(
-        env::var("AWS_ACCESS_KEY_ID")?,
-        env::var("AWS_SECRET_ACCESS_KEY")?,
-        Some(env::var("AWS_SESSION_TOKEN")?),
-        None,
-        "manual",
-    )
-    .into();
-
-    let region = "${REGION}";
-    let service_id = "srv-jotpxhnr7nxsff4c";
-    let host = format!("servicediscovery.{}.amazonaws.com", region);
-    let endpoint = format!("https://{}", host);
+    let signer = aws::default_signer("servicediscovery", "${REGION}")
+        .with_credential_provider(credential_loader);
 
     let payload = serde_json::json!({
-        "ServiceId": service_id
+        "NamespaceName": "aeroftp",
+        "ServiceName": "aeroftp-service"
     });
-    let body = serde_json::to_vec(&payload)?;
-    let content_length = body.len().to_string();
+    let body_bytes = serde_json::to_vec(&payload)?;
 
-    let headers = [
-        ("host", host.as_str()),
-        ("content-length", content_length.as_str()),
-        ("content-type", "application/x-amz-json-1.1"),
-        ("x-amz-target", "Route53AutoNaming_v20170314.ListInstances"),
-    ];
+    let mut hasher = Sha256::new();
+    hasher.update(&body_bytes);
+    let body_hash = hex::encode(hasher.finalize());
 
-    let mut signing_settings = SigningSettings::default();
-    signing_settings.payload_checksum_kind =
-        aws_sigv4::http_request::PayloadChecksumKind::XAmzSha256;
-
-    let signing_params = v4::SigningParams::builder()
-        .region(region)
-        .name("servicediscovery")
-        .identity(&identity)
-        .settings(signing_settings)
-        .time(SystemTime::now())
-        .build()
-        .expect("signing prams")
-        .into();
-
-    let signable =
-        SignableRequest::new("POST", "/", headers.into_iter(), SignableBody::Bytes(&body))?;
-
-    let (instruction, _) = sign(signable, &signing_params)?.into_parts();
-
-    let agent = Agent::config_builder()
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::PlatformVerifier)
-                .build(),
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("https://data-servicediscovery.${REGION}.amazonaws.com")
+        .header("content-type", "application/x-amz-json-1.1")
+        .header(
+            "x-amz-target",
+            "Route53AutoNaming_v20170314.DiscoverInstances",
         )
-        .http_status_as_error(false)
-        .build()
-        .new_agent();
+        .header("x-amz-content-sha256", body_hash)
+        .body(body_bytes)?;
 
-    let mut req = agent.post(&endpoint);
-    for (name, value) in headers.into_iter() {
-        // println!("Adding header: {} -> {}", name, value);
-        req = req.header(name, value);
-    }
-    for (name, value) in instruction.headers() {
-        // println!("Adding header: {} -> {}", name, value);
-        req = req.header(name, value);
-    }
+    let (mut parts, body) = req.into_parts();
+    signer.sign(&mut parts, None).await?;
+    let signed_req = Request::from_parts(parts, body);
 
-    let mut response = req.send(&body)?;
+    let client = reqwest::Client::new();
+    let req = reqwest::Request::try_from(signed_req)?;
+    // println!("Request: {:?}", req);
 
-    // "Instances": [
-    //     {
-    //         "Id": "97e7125e4dd341cb8809ebbcac1fd402",
-    //         "Attributes": {
-    //             "AWS_INSTANCE_IPV4": "172.16.31.167",
-    //             "AWS_INSTANCE_PORT": "21",
-    //             "AvailabilityZone": "${REGION}b",
-    //             "DeploymentId": "arn:aws:ecs:${REGION}:${ACCOUNT_ID}:task-set/${CLUSTER}/aeroftp-service/ecs-svc/0596460527630332029"
-    //         }
-    //     }
-    // ]
+    let resp = client.execute(req).await?;
 
-    let response = response.body_mut().read_json::<ResponseBody>()?;
+    // println!("Response: {:?}", resp);
+
+    let response = resp.json::<DiscoverInstancesResponse>().await?;
 
     let mut endpoints: Vec<String> = vec![];
-
-    for i in response.instances.clone() {
-        endpoints.push(format!("http://{}:9090", i.attributes.aws_instance_ipv4));
+    for i in response.instances {
+        if let Some(ip) = i.attributes.get("AWS_INSTANCE_IPV4") {
+            endpoints.push(format!("http://{}:9090/metrics", ip));
+        }
     }
+    // println!("Endpoints: {:?}", endpoints);
 
     Ok(endpoints)
 }
 
 async fn scrape_and_record(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let body = reqwest::get(url).await?.text().await?;
+    // println!("Body: {}", body);
     let scrape = Scrape::parse(body.lines().map(|s| Ok(s.to_owned())))?;
+    // println!("Scrape: {:?}", scrape);
 
     for sample in scrape.samples {
         // Map labels to metrics labels
@@ -161,6 +272,7 @@ async fn scrape_and_record(url: &str) -> Result<(), Box<dyn std::error::Error>> 
             _ => 0.0, // Handle Summaries or unknown types as needed
         };
 
+        // println!("Metric: {}, Value: {}", sample.metric, val);
         // Push to the metrics facade
         // Note: EMF typically handles counters and gauges as absolute values
         // depending on how you define them in the recorder configuration.
@@ -171,6 +283,12 @@ async fn scrape_and_record(url: &str) -> Result<(), Box<dyn std::error::Error>> 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let credential_loader = CachingAwsCredentialLoader::new();
+
     // 1. Initialize the EMF Recorder
     // This will periodically flush metrics to stdout in EMF format
     let _recorder = Builder::new()
@@ -180,7 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
 
     // 2. Your discovery logic would provide these URLs
-    let endpoints = get_endpoints()?;
+    let endpoints = get_endpoints(credential_loader).await?;
 
     loop {
         for url in &endpoints {
