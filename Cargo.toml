@@ -4,8 +4,8 @@ publish = false
 edition = "2021"
 
 [dependencies]
-libunftp = { path = "../libunftp", features = ["aws_lc_rs", "prometheus"] }
-# libunftp = { version = "0.21.1", features = ["aws_lc_rs", "prometheus"] }
+libunftp = { path = "../libunftp", features = ["aws_lc_rs", "prometheus", "proxy_protocol"] }
+#libunftp = { version = "0.21.1", features = ["aws_lc_rs", "prometheus", "proxy_protocol"] }
 tokio = { version = "1.48.0", features = ["signal", "macros", "rt-multi-thread", "tracing"] }
 opendal = { version = "0.55.0", default-features = false, features = ["services-azdls", "services-s3", "executors-tokio"] }
 anyhow = { version = "1.0.100" }
