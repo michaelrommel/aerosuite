@@ -7,20 +7,22 @@ use reqsign::aws;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use aws_credential_types::Credentials;
 use chrono::{DateTime, TimeZone, Utc};
 use metrics::{counter, gauge};
 use metrics_cloudwatch_embedded::Builder;
 use prometheus_parse::Scrape;
-use reqwest::Client;
 use std::{
     boxed::Box,
     collections::HashMap,
     env,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::RwLock;
+use tokio::{
+    sync::{RwLock, mpsc},
+    task::JoinSet,
+    time::{Duration, sleep},
+};
 
 use tracing_subscriber::EnvFilter;
 
@@ -51,7 +53,7 @@ impl AwsCreds {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CachingAwsCredentialLoader {
     // this is a reference that can be shared across async tasks
     credentials: Arc<RwLock<AwsCreds>>,
@@ -191,7 +193,7 @@ pub struct Instance {
 
 async fn get_endpoints(
     credential_loader: CachingAwsCredentialLoader,
-) -> Result<Vec<String>, Error> {
+) -> Result<Vec<(String, String)>, Error> {
     // tracing_subscriber::fmt()
     //     .with_env_filter(EnvFilter::new("trace"))
     //     .init();
@@ -234,10 +236,10 @@ async fn get_endpoints(
 
     let response = resp.json::<DiscoverInstancesResponse>().await?;
 
-    let mut endpoints: Vec<String> = vec![];
+    let mut endpoints: Vec<(String, String)> = vec![];
     for i in response.instances {
         if let Some(ip) = i.attributes.get("AWS_INSTANCE_IPV4") {
-            endpoints.push(format!("http://{}:9090/metrics", ip));
+            endpoints.push((i.instance_id, format!("http://{}:9090/metrics", ip)));
         }
     }
     // println!("Endpoints: {:?}", endpoints);
@@ -245,38 +247,43 @@ async fn get_endpoints(
     Ok(endpoints)
 }
 
-async fn scrape_and_record(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn scrape_and_record(id: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let body = reqwest::get(url).await?.text().await?;
     // println!("Body: {}", body);
     let scrape = Scrape::parse(body.lines().map(|s| Ok(s.to_owned())))?;
     // println!("Scrape: {:?}", scrape);
 
+    // Scrape: Scrape { docs: {"ftp_command_total": "Total number of commands received.", "ftp_sessions_count": "Total number of FTP sessions.", "ftp_reply_total": "Total number of reply codes server sent to clients.", "process_virtual_memory_bytes": "Virtual memory size in bytes.", "ftp_sessions_total": "Total number of FTP sessions.", "process_cpu_seconds_total": "Total user and system CPU time spent in seconds.", "process_start_time_seconds": "Start time of the process since unix epoch in seconds.", "process_threads": "Number of OS threads in the process.", "process_max_fds": "Maximum number of open file descriptors.", "process_resident_memory_bytes": "Resident memory size in bytes.", "process_open_fds": "Number of open file descriptors."}, samples: [Sample { metric: "ftp_command_total", value: Counter(1.0), labels: Labels({"command": "quit"}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "ftp_reply_total", value: Counter(1.0), labels: Labels({"event": "quit", "range": "2xx", "event_type": "command"}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "ftp_sessions_count", value: Counter(1.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "ftp_sessions_total", value: Gauge(0.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_cpu_seconds_total", value: Counter(0.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_max_fds", value: Gauge(65535.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_open_fds", value: Gauge(22.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_resident_memory_bytes", value: Gauge(27709440.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_start_time_seconds", value: Gauge(1772217439.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_threads", value: Gauge(6.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }, Sample { metric: "process_virtual_memory_bytes", value: Gauge(45023232.0), labels: Labels({}), timestamp: 2026-02-27T20:10:33.861081004Z }] }
+
     for sample in scrape.samples {
         // Map labels to metrics labels
-        let labels: Vec<(String, String)> = sample
+        let mut labels: Vec<(String, String)> = sample
             .labels
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        labels.push(("TaskId".to_string(), id.to_string()));
 
-        // Extract the f64 from the Value enum
-        let val = match sample.value {
-            prometheus_parse::Value::Counter(v) => v,
-            prometheus_parse::Value::Gauge(v) => v,
-            prometheus_parse::Value::Untyped(v) => v,
+        match sample.value {
+            prometheus_parse::Value::Counter(v) => {
+                counter!(sample.metric.clone(), &labels).absolute(v as u64);
+            }
+            prometheus_parse::Value::Gauge(v) => {
+                gauge!(sample.metric.clone(), &labels).set(v);
+            }
+            prometheus_parse::Value::Untyped(v) => {
+                gauge!(sample.metric.clone(), &labels).set(v);
+            }
             prometheus_parse::Value::Histogram(ref v) => {
                 // Histograms are complex; usually you'd iterate the buckets,
                 // but for a minimal scraper, you might just grab the sum.
-                v.iter().map(|b| b.count).sum::<f64>()
+                let val = v.iter().map(|b| b.count).sum::<f64>();
+                gauge!(sample.metric.clone(), &labels).set(val);
             }
-            _ => 0.0, // Handle Summaries or unknown types as needed
+            _ => {
+                gauge!(sample.metric.clone(), &labels).set(0.0);
+            }
         };
-
-        // println!("Metric: {}, Value: {}", sample.metric, val);
-        // Push to the metrics facade
-        // Note: EMF typically handles counters and gauges as absolute values
-        // depending on how you define them in the recorder configuration.
-        gauge!(sample.metric.clone(), &labels).set(val);
     }
     Ok(())
 }
@@ -289,27 +296,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let credential_loader = CachingAwsCredentialLoader::new();
 
-    // 1. Initialize the EMF Recorder
-    // This will periodically flush metrics to stdout in EMF format
+    // Initialize the EMF Recorder
+    // This will periodically flush metrics to stdout in EMF format, it runs
+    // on a separate background tokio task
     let _recorder = Builder::new()
-        .cloudwatch_namespace("MyScrapedMetrics")
+        .cloudwatch_namespace("AeroFTP")
         .with_auto_flush_interval(Duration::from_secs(30)) // Flush every minute
         .init()
         .unwrap();
 
-    // 2. Your discovery logic would provide these URLs
-    let endpoints = get_endpoints(credential_loader).await?;
+    // This is the set of tasks, we spawn ourselves
+    let mut set: JoinSet<Result<()>> = JoinSet::new();
+    // Bounded channel with capacity of 32 messages
+    // It is needed to inform the scraping task about the existing
+    // endpoints
+    let (tx, mut rx) = mpsc::channel(32);
 
-    loop {
-        for url in &endpoints {
-            if let Err(e) = scrape_and_record(url).await {
-                eprintln!("Failed to scrape {}: {}", url, e);
+    set.spawn(async move {
+        // hold discovered endpoints
+        let mut endpoints: Vec<(String, String)> = [].to_vec();
+        loop {
+            // discover all endpoints
+            let updated_endpoints = get_endpoints(credential_loader.clone()).await?;
+            if updated_endpoints != endpoints {
+                println!("Discovered new endpoints: {:?}", updated_endpoints);
+                endpoints = updated_endpoints;
+                // send those over to the scraper
+                tx.send(endpoints.clone()).await.unwrap();
             }
+            // wait inside the task and update the endpoints again
+            sleep(Duration::from_secs(60)).await;
         }
+    });
 
-        // Explicitly flush if you aren't using the auto_flush background task
-        // recorder.flush(std::io::stdout());
+    set.spawn(async move {
+        let mut endpoints: Vec<(String, String)> = [].to_vec();
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    println!("Received new endpoints: {:?}", msg);
+                    endpoints = msg;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    // No message yet, totally fine!
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    println!("Sender hung up, exiting loop.");
+                    break;
+                }
+            }
 
-        tokio::time::sleep(Duration::from_secs(15)).await;
+            for (id, url) in &endpoints {
+                if let Err(e) = scrape_and_record(id, url).await {
+                    eprintln!("Failed to scrape {}: {}", url, e);
+                }
+            }
+            // Explicitly flush if you aren't using the auto_flush background task
+            // recorder.flush(std::io::stdout());
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+        Ok(())
+    });
+
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(taskresult) => match taskresult {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("A task failed: {:?}", e);
+                }
+            },
+            Err(e) => eprintln!("A JoinHandle failed: {:?}", e),
+        }
     }
+
+    println!("All tasks joined.");
+
+    Ok(())
 }
