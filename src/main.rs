@@ -3,6 +3,7 @@ mod metrics;
 
 use anyhow::{anyhow, Context, Error};
 use chrono::{DateTime, TimeZone, Utc};
+use libunftp::options::ActivePassiveMode;
 use opendal::{services::S3, Operator};
 use reqsign::AwsCredential;
 use reqwest::Client;
@@ -203,24 +204,32 @@ async fn start_ftp(
     //     drop(done4)
     // });
 
-    let server6 = libunftp::ServerBuilder::new(Box::new(move || backend.clone()))
+    // let passive_host = env::var("HAPROXY_IP").unwrap();
+
+    let server = libunftp::ServerBuilder::new(Box::new(move || backend.clone()))
         .authenticator(Arc::new(authenticator))
         .shutdown_indicator(async move {
             shutdown.recv().await.ok();
             println!("Shutting down FTP server");
             libunftp::options::Shutdown::new().grace_period(Duration::from_secs(11))
         })
+        .idle_session_timeout(600)
+        .proxy_protocol_mode(21)
         .passive_host(libunftp::options::PassiveHost::FromConnection)
-        .passive_ports(40000..=49999)
+        // .passive_host(&*passive_host)
+        .passive_ports(30000..=49999)
+        .active_passive_mode(ActivePassiveMode::ActiveAndPassive)
         .metrics()
         .build()
         .map_err(|e| format!("Could not build server: {}", e))?;
 
     tokio::spawn(async move {
         // this allows us to listen on IPv4 and IPv6 simultaneously
-        let addr = "[::]:21";
+        //let addr = "[::]:21";
+        // this is now IPv4 only
+        let addr = "0.0.0.0:21";
         println!("Starting ftp server on {}", addr);
-        if let Err(e) = server6.listen(addr).await {
+        if let Err(e) = server.listen(addr).await {
             println!("FTP server error: {:?}", e)
         }
         println!("FTP exiting");
