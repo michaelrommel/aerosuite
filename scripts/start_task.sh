@@ -13,6 +13,16 @@ if [[ -z "$SPOT" ]]; then
 	SPOT=FARGATE_SPOT
 fi
 
+# AEROSTRESS_TARGET:	The IP Address to connect to
+# AEROSTRESS_DELAY:		Ramp up delay in seconds between consecutive batches
+# AEROSTRESS_BATCHES:	Number of batches to start
+# AEROSTRESS_TASKS:		Number of tasks per batch, one task is one client
+# AEROSTRESS_SIZE:		The file size in MBytes to use for uploads
+# AEROSTRESS_LIMITER:	Boolean value, if a limit shall be set
+# AEROSTRESS_CHUNK:		The size of the chunks in bytes to send the file with, 0 means use standard 4k
+# AEROSTRESS_INTERVAL:	Interval in ms between chunks of data, 0 means, no rate limit
+# AEROSTRESS_MSS:		The Maximum Segment Size of the socket, 0 means no fixed MSS
+
 for i in {1..1}; do
 	aws ecs run-task \
 		--count 1 \
@@ -20,17 +30,20 @@ for i in {1..1}; do
 		--capacity-provider-strategy capacityProvider=${SPOT},weight=1 \
 		--network-configuration "awsvpcConfiguration={subnets=[subnet-0cc4dd3ae05f9c278,subnet-0779b66ce8c3a599c],securityGroups=[sg-06d737ea5595c275d],assignPublicIp=ENABLED}" \
 		--task-definition aerostress:2 \
+		--enable-execute-command \
 		--overrides "{
 			\"containerOverrides\": [{
 				\"name\": \"aerostress\",
 				\"environment\": [
-					{\"name\": \"AEROSTRESS_DELAY\", \"value\": \"5\"},
-					{\"name\": \"AEROSTRESS_BATCHES\", \"value\": \"1\"},
-					{\"name\": \"AEROSTRESS_TASKS\", \"value\": \"10\"},
 					{\"name\": \"AEROSTRESS_TARGET\", \"value\": \"${TARGET}\"},
-					{\"name\": \"AEROSTRESS_SIZE\", \"value\": \"18\"},
-					{\"name\": \"AEROSTRESS_THROTTLE\", \"value\": \"8192\"},
-					{\"name\": \"AEROSTRESS_CHUNK\", \"value\": \"4096\"}
+					{\"name\": \"AEROSTRESS_DELAY\", \"value\": \"60\"},
+					{\"name\": \"AEROSTRESS_BATCHES\", \"value\": \"1\"},
+					{\"name\": \"AEROSTRESS_TASKS\", \"value\": \"1\"},
+					{\"name\": \"AEROSTRESS_SIZE\", \"value\": \"20\"},
+					{\"name\": \"AEROSTRESS_LIMITER\", \"value\": \"false\"},
+					{\"name\": \"AEROSTRESS_CHUNK\", \"value\": \"4096\"},
+					{\"name\": \"AEROSTRESS_INTERVAL\", \"value\": \"4\"},
+					{\"name\": \"AEROSTRESS_MSS\", \"value\": \"0\"}
 				]
 			}]
 		}"
