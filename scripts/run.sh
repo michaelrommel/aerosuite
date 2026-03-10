@@ -2,14 +2,14 @@
 
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/zscaler_root.pem
 
-CREDENTIALS=$(aws-sso-util credential-process --profile logsan_stats_complete_484651457934 --sso-start-url https://shsconsole.awsapps.com/start --sso-region us-east-1)
+CREDENTIALS=$(aws-sso-util credential-process --profile default --sso-start-url https://shsconsole.awsapps.com/start --sso-region us-east-1)
 if [[ $? != 0 ]]; then
 	CHECK=$(aws-sso-util check --sso-start-url https://shsconsole.awsapps.com/start --sso-region us-east-1 --force-refresh)
 	if [[ $? != 0 ]]; then
 		echo "No credentials and refresh failed"
 		exit 1
 	else
-		CREDENTIALS=$(aws-sso-util credential-process --profile logsan_stats_complete_484651457934 --sso-start-url https://shsconsole.awsapps.com/start --sso-region us-east-1)
+		CREDENTIALS=$(aws-sso-util credential-process --profile default --sso-start-url https://shsconsole.awsapps.com/start --sso-region us-east-1)
 		if [[ $? != 0 ]]; then
 			echo "login successful but no credentials found"
 			exit 1

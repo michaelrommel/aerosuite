@@ -28,8 +28,8 @@ async fn main() -> Result<()> {
 
     let builder = S3::default()
         .endpoint("https://s3.amazonaws.com")
-        .region("eu-central-1")
-        .bucket("dev-nucleus-aeroftp")
+        .region("eu-west-2")
+        .bucket("dev-s3-aeroftp")
         .root("/");
     // .access_key_id("ASIXXXXXXXXXXXXXX25D")
     // .secret_access_key("a/KI7rxxxxxxxxxxxxxy9upV5Xw")
