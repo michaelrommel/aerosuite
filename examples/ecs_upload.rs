@@ -1,13 +1,13 @@
 use aws_config::BehaviorVersion;
 use chrono::{TimeZone, Utc};
+use opendal::options;
 use opendal::services::S3;
 use opendal::Operator;
-use opendal::options;
 use reqsign::AwsCredential;
 use reqwest::Client;
 use std::boxed::Box;
-use std::time::{UNIX_EPOCH};
 use std::collections::HashMap;
+use std::time::UNIX_EPOCH;
 
 use aws_config::meta::region::RegionProviderChain;
 use aws_credential_types::provider::ProvideCredentials;
@@ -50,9 +50,9 @@ impl reqsign::AwsCredentialLoad for AwsCredentialLoad {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let builder = S3::default()
-    .bucket("dev-s3-aeroftp")
-    .region("${REGION}")
-    .customized_credential_load(Box::new(AwsCredentialLoad));
+        .bucket("dev-s3-aeroftp")
+        .region("${REGION}")
+        .customized_credential_load(Box::new(AwsCredentialLoad));
 
     let op: Operator = Operator::new(builder)?.finish();
 

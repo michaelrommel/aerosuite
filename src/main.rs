@@ -1,7 +1,7 @@
 mod http;
 mod metrics;
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::{Context, Error};
 use chrono::{DateTime, TimeZone, Utc};
 use libunftp::options::ActivePassiveMode;
 use opendal::{services::S3, Operator};
@@ -27,6 +27,23 @@ struct AwsCreds {
     // this is the structure of the AWS Metadata Service response
     #[allow(dead_code)]
     role_arn: String,
+    access_key_id: String,
+    secret_access_key: String,
+    token: String,
+    expiration: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "PascalCase")]
+struct Ec2Creds {
+    // this is the structure of the AWS Metadata Service response from EC2
+    #[allow(dead_code)]
+    code: String,
+    #[allow(dead_code)]
+    last_updated: String,
+    #[allow(dead_code)]
+    #[serde(rename = "Type")]
+    r#type: String,
     access_key_id: String,
     secret_access_key: String,
     token: String,
@@ -84,6 +101,62 @@ impl CachingAwsCredentialLoader {
         }
     }
 
+    async fn get_ec2_credentials(&self, client: Client) -> Result<AwsCreds, Error> {
+        let temp_token = client
+            .put("http://169.254.169.254/latest/api/token")
+            .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+            .send()
+            .await
+            .context("Could not fetch temp token")?
+            .text()
+            .await
+            .context("Could not parse temp token")?;
+        println!("temp_token: {:?}", temp_token);
+        let iam_role = client
+            .get("http://169.254.169.254/latest/meta-data/iam/security-credentials/")
+            .header("X-aws-ec2-metadata-token", &temp_token)
+            .send()
+            .await
+            .context("Could not fetch IAM role")?
+            .text()
+            .await
+            .context("Could not parse IAM role")?;
+        println!("iam role: {}", iam_role);
+        let response = client
+            .get(format!(
+                "http://169.254.169.254/latest/meta-data/iam/security-credentials/{}",
+                iam_role
+            ))
+            .header("X-aws-ec2-metadata-token", &temp_token)
+            .send()
+            .await
+            .context("Could not fetch credentials")?
+            .text()
+            .await
+            .unwrap();
+        println!("Response: {:?}", response);
+        let credentials = client
+            .get(format!(
+                "http://169.254.169.254/latest/meta-data/iam/security-credentials/{}",
+                iam_role
+            ))
+            .header("X-aws-ec2-metadata-token", &temp_token)
+            .send()
+            .await
+            .context("Could not fetch credentials")?
+            .json::<Ec2Creds>()
+            .await
+            .context("Failed to parse credentials")?;
+
+        Ok(AwsCreds {
+            role_arn: "".to_string(),
+            access_key_id: credentials.access_key_id,
+            secret_access_key: credentials.secret_access_key,
+            token: credentials.token,
+            expiration: credentials.expiration,
+        })
+    }
+
     async fn provision_credentials(&self, client: Client) -> Result<AwsCreds, Error> {
         let url = if let Ok(full_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
             Some(full_uri)
@@ -92,6 +165,7 @@ impl CachingAwsCredentialLoader {
         } else {
             None
         };
+
         match url {
             Some(url) => {
                 // println!("Fetching from {}", url);
@@ -104,7 +178,7 @@ impl CachingAwsCredentialLoader {
                     .await
                     .context("Failed to parse credentials")
             }
-            None => Err(anyhow!("No ECS URI set")),
+            None => self.get_ec2_credentials(client).await,
         }
     }
 }
@@ -204,8 +278,6 @@ async fn start_ftp(
     //     drop(done4)
     // });
 
-    // let passive_host = env::var("HAPROXY_IP").unwrap();
-
     let server = libunftp::ServerBuilder::new(Box::new(move || backend.clone()))
         .authenticator(Arc::new(authenticator))
         .shutdown_indicator(async move {
@@ -214,11 +286,10 @@ async fn start_ftp(
             libunftp::options::Shutdown::new().grace_period(Duration::from_secs(11))
         })
         .idle_session_timeout(600)
-        .proxy_protocol_mode(21)
-        .passive_host(libunftp::options::PassiveHost::FromConnection)
-        // .passive_host(&*passive_host)
-        .passive_ports(30000..=49999)
+        // .proxy_protocol_mode(21)
         .active_passive_mode(ActivePassiveMode::ActiveAndPassive)
+        .passive_host(libunftp::options::PassiveHost::FromConnection)
+        .passive_ports(30000..=49999)
         .metrics()
         .build()
         .map_err(|e| format!("Could not build server: {}", e))?;
