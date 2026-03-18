@@ -16,16 +16,12 @@ mod signal;
 #[cfg(feature = "tokio_console")]
 use std::net::SocketAddr;
 
+use log::{error, info};
 use std::process;
 
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
-
-    // let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-    // let tmp_dir = env::temp_dir();
-    // let _tmp_dir = tmp_dir.as_path().to_str().unwrap();
 
     #[cfg(feature = "tokio_console")]
     {
@@ -52,9 +48,19 @@ async fn main() {
     }
 
     if let Err(e) = run().await {
-        eprintln!("\nError: {}", e);
+        error!("\nError: {}", e);
         process::exit(1);
     };
+}
+
+async fn run() -> Result<(), String> {
+    // We wait for a signal (HUP, INT, TERM). If the signal is a HUP,
+    // we restart, otherwise we exit the loop and the program ends.
+    while main_task().await? == signal::ExitSignal::Hup {
+        info!("Restarting on HUP");
+    }
+    info!("Exiting");
+    Ok(())
 }
 
 async fn main_task() -> Result<signal::ExitSignal, String> {
@@ -67,7 +73,7 @@ async fn main_task() -> Result<signal::ExitSignal, String> {
     let addr = String::from("[::]:9090");
     tokio::spawn(async move {
         if let Err(e) = http::start(&addr, http_receiver, http_done_sender).await {
-            println!("HTTP Server error: {}", e)
+            error!("HTTP Server error: {}", e);
         }
     });
 
@@ -76,7 +82,7 @@ async fn main_task() -> Result<signal::ExitSignal, String> {
     let signal = signal::listen_for_signals()
         .await
         .map_err(|e: Error| e.to_string())?;
-    println!("Received signal {}, shutting down...", signal);
+    info!("Received signal {}, shutting down...", signal);
 
     drop(shutdown_sender);
 
@@ -85,14 +91,4 @@ async fn main_task() -> Result<signal::ExitSignal, String> {
     let _ = shutdown_done_received.recv().await;
 
     Ok(signal)
-}
-
-async fn run() -> Result<(), String> {
-    // We wait for a signal (HUP, INT, TERM). If the signal is a HUP,
-    // we restart, otherwise we exit the loop and the program ends.
-    while main_task().await? == signal::ExitSignal::Hup {
-        println!("Restarting on HUP");
-    }
-    println!("Exiting");
-    Ok(())
 }
