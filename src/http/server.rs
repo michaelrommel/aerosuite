@@ -5,13 +5,14 @@ use http_body_util::{Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use log::{debug, error, info};
 use std::convert::Infallible;
-use std::{net::SocketAddr, result::Result};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 const PATH_METRICS: &str = "/metrics";
 
-// starts an HTTP server and exports Prometheus metrics.
+/// Start the HTTP metrics server.
 pub async fn start(
     bind_addr: &str,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
@@ -28,8 +29,8 @@ pub async fn start(
         hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
 
-    println!("Starting HTTP service, {}", &http_addr);
-    println!("Exposing Prometheus {} exporter endpoint.", PATH_METRICS);
+    info!("Starting HTTP service, {}", &http_addr);
+    info!("Exposing Prometheus {} exporter endpoint.", PATH_METRICS);
 
     loop {
         tokio::select! {
@@ -37,41 +38,41 @@ pub async fn start(
                 let (stream, _peer_addr) = match conn {
                     Ok(conn) => conn,
                     Err(e) => {
-                        println!("Accept error: {}", e);
+                        error!("Accept error: {}", e);
                         continue;
                     }
                 };
-                // println!("Incoming connection accepted: {}", peer_addr);
 
-                let stream = hyper_util::rt::TokioIo::new(stream);
+                let handler = HttpHandler {};
 
-                let conn = http_server.serve_connection_with_upgrades(stream, service_fn(move |req: Request<Incoming>| async move {
-                    let handler = HttpHandler { };
-                    handler.router(req).await
+                let conn = http_server.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service_fn(move |req: Request<Incoming>| {
+                    let handler = handler.clone();
+                    async move { handler.router(req).await }
                 }));
 
                 let conn = graceful.watch(conn.into_owned());
 
                 tokio::spawn(async move {
                     if let Err(err) = conn.await {
-                        println!("connection error: {}", err);
+                        debug!("connection error: {}", err);
                     }
-                    // println!("connection dropped: {}", peer_addr);
                 });
             },
             _ = shutdown.recv() => {
                 drop(listener);
-                println!("Shutting down HTTP server");
+                info!("Shutting down HTTP server");
                 break;
             }
         }
     }
 
-    println!("HTTP shutdown OK");
+    debug!("HTTP shutdown OK");
     drop(done);
     Ok(())
 }
 
+#[derive(Clone)]
+/// HTTP request handler for metrics endpoint.
 struct HttpHandler {
     // pub ftp_addr: SocketAddr,
 }
@@ -83,15 +84,22 @@ impl HttpHandler {
     ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, http::Error> {
         let (parts, _) = req.into_parts();
 
-        let response = match (parts.method, parts.uri.path()) {
-            (Method::GET, PATH_METRICS) => Ok(Response::new(UnsyncBoxBody::new(Full::new(
-                metrics::gather().into(),
-            )))),
+        match (parts.method, parts.uri.path()) {
+            (Method::GET, PATH_METRICS) => {
+                if let Ok(metrics_data) = metrics::gather() {
+                    Ok(Response::new(UnsyncBoxBody::new(Full::new(
+                        metrics_data.into(),
+                    ))))
+                } else {
+                    error!("Failed to gather metrics");
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(UnsyncBoxBody::new(Empty::<Bytes>::new()))
+                }
+            }
             _ => Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(UnsyncBoxBody::new(Empty::<Bytes>::new())),
-        };
-
-        response
+        }
     }
 }
