@@ -25,7 +25,8 @@
 const TEMP_FILE_NAME: &str = "mediumfile.dat";
 
 mod config;
-pub use config::{parse_config, Config};
+
+pub use config::{Config, parse_config};
 
 use anyhow::{Context, Result};
 use async_stream::stream;
@@ -44,22 +45,39 @@ use tokio::{
     io::{AsyncWriteExt, BufWriter},
     net::TcpStream,
     task::JoinSet,
-    time::{Duration, sleep},
+    time::{Duration, sleep, timeout},
 };
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
+type TcpStreamFuture =
+    Pin<Box<dyn futures::Future<Output = Result<TcpStream, suppaftp::FtpError>> + Send + Sync>>;
+
+/// Rate limiter configuration for FTP upload throttling.
 #[derive(Debug, Copy, Clone)]
-struct RateLimiterConfig {
-    limiter: bool,
-    size: u32,
-    interval: u64,
-    mss: u32,
+pub struct RateLimiterConfig {
+    /// Whether rate limiting is enabled
+    pub limiter: bool,
+
+    /// Chunk size for streaming in KB
+    pub size: u32,
+
+    /// Rate limit interval in milliseconds (0 = no throttling)
+    pub interval: u64,
+
+    /// TCP Maximum Segment Size (MSS)
+    pub mss: u32,
 }
 
 impl RateLimiterConfig {
     /// Creates a new rate limiter configuration.
-    fn new(limiter: bool, size: u32, interval: u64, mss: u32) -> Self {
+    ///
+    /// # Arguments
+    /// * `limiter` - Whether to enable rate limiting
+    /// * `size` - Chunk size for streaming in KB
+    /// * `interval` - Rate limit interval in milliseconds (0 = no throttling)
+    /// * `mss` - TCP Maximum Segment Size
+    pub fn new(limiter: bool, size: u32, interval: u64, mss: u32) -> Self {
         Self {
             limiter,
             size,
@@ -80,13 +98,15 @@ impl RateLimiterConfig {
 /// # Errors
 /// Returns an error if the file cannot be created, written, or flushed.
 async fn setup_files(file_size_mb: u32) -> Result<u64> {
+    const BUFFER_CAPACITY: usize = 256 * 1024;
+
     let target_size: u64 = (file_size_mb as u64) * 1024 * 1024;
     let mut written: u64 = 0;
 
     let file = File::create(TEMP_FILE_NAME)
         .await
         .context("Temporary file could not be created")?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::with_capacity(BUFFER_CAPACITY, file);
     // Using a buffer to speed up writing for large files
     const CHUNK_SIZE: usize = 8192;
     let mut buffer = [0u8; CHUNK_SIZE];
@@ -136,7 +156,7 @@ async fn write_async(
     let mut ftp_stream = AsyncFtpStream::connect(destination)
         .await
         .with_context(|| format!("FTP Stream {}-{} could not connect to server", batch, num))?;
-    println!("Stream {}-{} connected to FTP server", batch, num);
+    debug!("Stream {}-{} connected to FTP server", batch, num);
     ftp_stream.set_mode(Mode::ExtendedPassive);
     ftp_stream
         .login("test", "secret")
@@ -173,15 +193,7 @@ async fn write_async(
                     .map_err(suppaftp::FtpError::ConnectionError)?;
                 TcpStream::from_std(std_stream).map_err(suppaftp::FtpError::ConnectionError)
             };
-            Box::pin(fut)
-                as Pin<
-                    Box<
-                        dyn futures::Future<
-                                Output = Result<tokio::net::TcpStream, suppaftp::FtpError>,
-                            > + Send
-                            + Sync,
-                    >,
-                >
+            Box::pin(fut) as TcpStreamFuture
         });
         let mut data_stream = ftp_stream.put_with_stream(filename).await?;
 
@@ -207,7 +219,7 @@ async fn write_async(
             };
             let async_reader = StreamReader::new(throttled_reader);
             tokio::pin!(async_reader);
-            println!(
+            debug!(
                 "Stream {}-{} created rate limited stream: interval {}, chunk size {}, mss {}",
                 batch, num, rlc.interval, rlc.size, rlc.mss
             );
@@ -222,7 +234,7 @@ async fn write_async(
         } else {
             let async_reader = StreamReader::new(reader_stream);
             tokio::pin!(async_reader);
-            println!(
+            debug!(
                 "Stream {}-{} created stream: interval {}, chunk size {}, mss {}",
                 batch, num, rlc.interval, rlc.size, rlc.mss
             );
@@ -240,7 +252,7 @@ async fn write_async(
             .await
             .with_context(|| format!("File {}-{} could not be sent", batch, num))?;
     }
-    debug!("Stream {}-{} successfully wrote {}", batch, num, filename);
+    info!("Stream {}-{} successfully wrote {}", batch, num, filename);
     ftp_stream
         .quit()
         .await
@@ -256,7 +268,7 @@ async fn write_async(
 //     // Store (PUT) a file from the client to the current working directory of the server.
 //     let mut reader = Cursor::new("Hello from the Rust \"ftp\" crate!".as_bytes());
 //     let _ = ftp_stream.put_file("greeting.txt", &mut reader);
-//     println!("Successfully wrote greeting.txt");
+//     info!("Successfully wrote greeting.txt");
 
 //     // Terminate the connection to the server.
 //     let _ = ftp_stream.quit();
@@ -283,17 +295,11 @@ async fn main() -> Result<()> {
     let file_size_bytes = setup_files(config.file_size_mb).await?;
     info!("File created, {} bytes", file_size_bytes);
 
-    let rlc = RateLimiterConfig::new(
-        config.limiter,
-        config.chunk_kb,
-        config.interval,
-        config.mss,
-    );
+    let rlc = RateLimiterConfig::new(config.limiter, config.chunk_kb, config.interval, config.mss);
     let destination = Arc::new(format!("{}:21", config.target));
 
     let start_time = Instant::now();
     let mut set: JoinSet<Result<u64>> = JoinSet::new();
-    let mut error_count: u64 = 0;
 
     for j in 1..=config.batches {
         info!("Starting {} parallel tasks...", config.tasks);
@@ -325,28 +331,41 @@ async fn main() -> Result<()> {
         sleep(Duration::from_secs(config.delay)).await;
     }
 
+    let mut success_count: u64 = 0;
+    let mut error_count: u64 = 0;
     let mut sum_bytes = 0u64;
+    const JOIN_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes timeout for joining tasks
 
-    while let Some(res) = set.join_next().await {
-        match res {
-            Ok(taskresult) => match taskresult {
-                Ok(b) => sum_bytes += b,
-                Err(e) => {
+    loop {
+        match timeout(JOIN_TIMEOUT, set.join_next()).await {
+            Ok(Some(res)) => match res {
+                Ok(Ok(bytes)) => {
+                    sum_bytes += bytes;
+                    success_count += 1;
+                }
+                Ok(Err(e)) => {
                     handle_task_error(&e);
                     error_count += 1;
                 }
+                Err(e) => {
+                    handle_join_error(&e);
+                    error_count += 1;
+                }
             },
-            Err(e) => {
-                handle_join_error(&e);
-                error_count += 1;
+            Ok(None) => break,
+            Err(_) => {
+                warn!("Timeout waiting for tasks after {:?}", JOIN_TIMEOUT);
+                set.shutdown().await;
+                break;
             }
         }
     }
 
     info!(
-        "All tasks joined. Total elapsed time: {:?}, total GiB: {:?}, errors: {}",
+        "All tasks joined. Total elapsed time: {:?}, total GiB: {:?}, success: {}, error: {}",
         start_time.elapsed(),
         sum_bytes / 1024 / 1024 / 1024,
+        success_count,
         error_count
     );
 

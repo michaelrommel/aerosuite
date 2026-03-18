@@ -2,16 +2,33 @@ use anyhow::{Context, Result};
 use std::env;
 
 /// FTP load test configuration parsed from environment variables.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    /// FTP server address (e.g., "127.0.0.1")
     pub target: String,
+
+    /// Number of batches to send
     pub batches: i32,
+
+    /// Parallel tasks per batch
     pub tasks: i32,
+
+    /// Delay in seconds between batches
     pub delay: u64,
+
+    /// Whether rate limiting is enabled
     pub limiter: bool,
+
+    /// Test file size in megabytes
     pub file_size_mb: u32,
+
+    /// Chunk size for streaming in kilobytes
     pub chunk_kb: u32,
+
+    /// Rate limit interval in milliseconds (0 = no throttling)
     pub interval: u64,
+
+    /// TCP Maximum Segment Size (MSS)
     pub mss: u32,
 }
 
@@ -35,7 +52,14 @@ impl ConfigBuilder {
         Self::default()
     }
 
-    /// Sets the FTP server target address.
+    /// Sets the FTP server target address (e.g., "127.0.0.1").
+    ///
+    /// # Example
+    /// ```
+    /// let config = ConfigBuilder::new()
+    ///     .target("ftp.example.com")
+    ///     .build();
+    /// ```
     pub fn target(mut self, value: impl Into<String>) -> Self {
         self.target = Some(value.into());
         self
@@ -71,19 +95,19 @@ impl ConfigBuilder {
         self
     }
 
-    /// Sets the chunk size for streaming in KB.
+    /// Sets the chunk size for streaming in kilobytes.
     pub fn chunk_kb(mut self, value: u32) -> Self {
         self.chunk_kb = Some(value);
         self
     }
 
-    /// Sets the rate limit interval in milliseconds.
+    /// Sets the rate limit interval in milliseconds (0 = no throttling).
     pub fn interval(mut self, value: u64) -> Self {
         self.interval = Some(value);
         self
     }
 
-    /// Sets the TCP MSS (Maximum Segment Size).
+    /// Sets the TCP Maximum Segment Size (MSS).
     pub fn mss(mut self, value: u32) -> Self {
         self.mss = Some(value);
         self
@@ -92,7 +116,7 @@ impl ConfigBuilder {
     /// Builds and validates the Config.
     ///
     /// # Errors
-    /// Returns an error if any required field is missing.
+    /// Returns an error if any required field is missing from the builder.
     pub fn build(self) -> Result<Config> {
         Ok(Config {
             target: self.target.context("target is required")?,
