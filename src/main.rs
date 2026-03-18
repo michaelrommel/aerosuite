@@ -1,7 +1,12 @@
-/// AeroFTP - FTP server with AWS S3 support and HTTP metrics endpoint.
-///
-/// This application provides an FTP server that integrates with AWS S3 for file storage,
-/// along with a Prometheus-compatible HTTP metrics endpoint on port 9090.
+//! AeroFTP - A secure FTP server with AWS credential support and HTTP metrics.
+//!
+//! This program implements an FTP server that:
+//! - Serves files over FTP on port 21
+//! - Exposes Prometheus-compatible metrics on HTTP (default: [::]:9090)
+//! - Supports graceful shutdown via HUP, INT, and TERM signals
+//! - Automatically restarts on HUP signal, exits on INT/TERM
+//! - Uses cached AWS credentials from EC2 metadata, ECS, or EKS providers
+
 mod aws;
 mod ftp;
 mod http;
