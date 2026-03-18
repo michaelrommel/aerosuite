@@ -24,6 +24,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libunftp",
+ "log",
  "opendal",
  "pretty_env_logger",
  "prometheus",

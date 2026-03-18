@@ -9,7 +9,7 @@ use std::collections::HashMap;
 async fn main() -> Result<()> {
     pretty_env_logger::init();
 
-    // // 1. Create and configure the AZDLS builder
+    // // 1. Create and configure the AZDLS builder{{{
     // let builder = Azdls::default()
     //     // Required: Set the endpoint (e.g., https://<account>.dfs.core.windows.net)
     //     .endpoint("https://lzstrXXXXXXXXXXXXuplgld.dfs.core.windows.net/")
@@ -24,16 +24,16 @@ async fn main() -> Result<()> {
     //     .account_key("GBs99xxxxxxx+9ch+AStEdjlUg==");
     // // .tenant_id("cfd26XXXXXXXXXXXXXXXXXXXXXX15d884")
     // // .client_id("fe72aXXXXXXXXXXXXXXXXXXXXXXXeceb36")
-    // // .client_secret("v~R8XXXXXXXXXXXXXXXXXXXXXXX9b5HwquU1aIJ");
+    // // .client_secret("v~R8XXXXXXXXXXXXXXXXXXXXXXX9b5HwquU1aIJ");}}}
 
     let builder = S3::default()
         .endpoint("https://s3.amazonaws.com")
         .region("${REGION}")
         .bucket("dev-s3-aeroftp")
         .root("/");
-    // .access_key_id("ASIXXXXXXXXXXXXXX25D")
+    // .access_key_id("ASIXXXXXXXXXXXXXX25D"){{{
     // .secret_access_key("a/KI7rxxxxxxxxxxxxxy9upV5Xw")
-    // .session_token("IQoJbxxxxxxxxxxxxxxxxxxxxxxxxxxxpB1bQo3M55/bD");
+    // .session_token("IQoJbxxxxxxxxxxxxxxxxxxxxxxxxxxxpB1bQo3M55/bD");}}}
 
     // Initialize the Operator
     let op: Operator = Operator::new(builder)?.finish();
@@ -51,12 +51,12 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // let caps = op.info().full_capability();
+    // let caps = op.info().full_capability();{{{
     // println!("{}", caps.write_with_user_metadata);
 
     // op.write_with("test-accountkey-writewith.txt", "Hello, World!")
     //     .user_metadata(vec![("owner".to_string(), "michael".to_string())])
-    //     .await?;
+    //     .await?;}}}
 
     Ok(())
 }
