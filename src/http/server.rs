@@ -5,6 +5,7 @@ use http_body_util::{Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::{rt::TokioExecutor, server::conn::auto::Builder};
 use log::{debug, error, info};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -25,8 +26,8 @@ pub async fn start(
     let listener = TcpListener::bind(http_addr)
         .await
         .map_err(|e| format!("unable to parse HTTP address {}: {}", bind_addr, e))?;
-    let http_server =
-        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+
+    let http_server = Builder::new(TokioExecutor::new());
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
 
     info!("Starting HTTP service, {}", &http_addr);
@@ -45,10 +46,13 @@ pub async fn start(
 
                 let handler = HttpHandler {};
 
-                let conn = http_server.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service_fn(move |req: Request<Incoming>| {
-                    let handler = handler.clone();
-                    async move { handler.router(req).await }
-                }));
+                let conn = http_server.serve_connection_with_upgrades(
+                    hyper_util::rt::TokioIo::new(stream),
+                    service_fn(move |req: Request<Incoming>| {
+                        let handler = handler.clone();
+                        async move { handler.router(req).await }
+                    }),
+                );
 
                 let conn = graceful.watch(conn.into_owned());
 
