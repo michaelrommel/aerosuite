@@ -9,7 +9,8 @@ pub struct Config {
     pub tasks: i32,
     pub delay: u64,
     pub limiter: bool,
-    pub chunk: u32,
+    pub file_size_mb: u32,
+    pub chunk_kb: u32,
     pub interval: u64,
     pub mss: u32,
 }
@@ -22,7 +23,8 @@ pub struct ConfigBuilder {
     tasks: Option<i32>,
     delay: Option<u64>,
     limiter: Option<bool>,
-    chunk: Option<u32>,
+    file_size_mb: Option<u32>,
+    chunk_kb: Option<u32>,
     interval: Option<u64>,
     mss: Option<u32>,
 }
@@ -63,9 +65,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// Sets the file size in megabytes for test files.
+    pub fn file_size_mb(mut self, value: u32) -> Self {
+        self.file_size_mb = Some(value);
+        self
+    }
+
     /// Sets the chunk size for streaming in KB.
-    pub fn chunk(mut self, value: u32) -> Self {
-        self.chunk = Some(value);
+    pub fn chunk_kb(mut self, value: u32) -> Self {
+        self.chunk_kb = Some(value);
         self
     }
 
@@ -92,7 +100,8 @@ impl ConfigBuilder {
             tasks: self.tasks.context("tasks is required")?,
             delay: self.delay.context("delay is required")?,
             limiter: self.limiter.context("limiter is required")?,
-            chunk: self.chunk.context("chunk is required")?,
+            file_size_mb: self.file_size_mb.context("file_size_mb is required")?,
+            chunk_kb: self.chunk_kb.context("chunk_kb is required")?,
             interval: self.interval.context("interval is required")?,
             mss: self.mss.context("mss is required")?,
         })
@@ -107,7 +116,8 @@ impl Default for ConfigBuilder {
             tasks: Some(20),
             delay: Some(10),
             limiter: Some(false),
-            chunk: Some(4),
+            file_size_mb: Some(10),
+            chunk_kb: Some(4),
             interval: Some(0),
             mss: Some(1460),
         }
@@ -145,7 +155,13 @@ pub fn parse_config() -> Result<Config> {
                 .parse()
                 .context("AEROSTRESS_LIMITER must be a boolean")?,
         )
-        .chunk(
+        .file_size_mb(
+            env::var("AEROSTRESS_SIZE")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .context("AEROSTRESS_SIZE must be a number")?,
+        )
+        .chunk_kb(
             env::var("AEROSTRESS_CHUNK")
                 .unwrap_or_else(|_| "4".to_string())
                 .parse()
@@ -178,7 +194,8 @@ mod tests {
             .tasks(50)
             .delay(5)
             .limiter(true)
-            .chunk(8)
+            .file_size_mb(12)
+            .chunk_kb(8)
             .interval(100)
             .mss(1200)
             .build()
@@ -189,7 +206,8 @@ mod tests {
         assert_eq!(config.tasks, 50);
         assert_eq!(config.delay, 5);
         assert!(config.limiter);
-        assert_eq!(config.chunk, 8);
+        assert_eq!(config.file_size_mb, 12);
+        assert_eq!(config.chunk_kb, 8);
         assert_eq!(config.interval, 100);
         assert_eq!(config.mss, 1200);
     }
@@ -203,7 +221,8 @@ mod tests {
         assert_eq!(config.tasks, 20);
         assert_eq!(config.delay, 10);
         assert!(!config.limiter);
-        assert_eq!(config.chunk, 4);
+        assert_eq!(config.file_size_mb, 10);
+        assert_eq!(config.chunk_kb, 4);
         assert_eq!(config.interval, 0);
         assert_eq!(config.mss, 1460);
     }
@@ -217,7 +236,8 @@ mod tests {
             tasks: Some(20),
             delay: Some(5),
             limiter: Some(false),
-            chunk: Some(4),
+            file_size_mb: Some(10),
+            chunk_kb: Some(4),
             interval: None,
             mss: Some(1460),
         }

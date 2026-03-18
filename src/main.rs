@@ -25,7 +25,7 @@
 const TEMP_FILE_NAME: &str = "mediumfile.dat";
 
 mod config;
-pub use config::Config;
+pub use config::{parse_config, Config};
 
 use anyhow::{Context, Result};
 use async_stream::stream;
@@ -33,9 +33,7 @@ use governor::{Quota, RateLimiter};
 use log::{debug, error, info, warn};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
-    env,
     net::{SocketAddr, TcpStream as StdTcpStream},
-    // num::NonZeroU32,
     pin::Pin,
     sync::Arc,
     time::Instant,
@@ -71,47 +69,46 @@ impl RateLimiterConfig {
     }
 }
 
-/// Creates a temporary file for testing with size from AEROSTRESS_SIZE env var.
+/// Creates a temporary file for testing.
+///
+/// # Arguments
+/// * `file_size_mb` - Size in megabytes to create
 ///
 /// # Returns
 /// The actual file size in bytes.
 ///
 /// # Errors
 /// Returns an error if the file cannot be created, written, or flushed.
-async fn setup_files() -> Result<u32> {
-    let filesize = env::var("AEROSTRESS_SIZE").unwrap_or_else(|_| "10".to_string());
-    let s: u32 = filesize
-        .parse()
-        .with_context(|| format!("AEROSTRESS_SIZE must be a valid number, got: {}", filesize))?;
-    let target_size: u32 = s * 1024 * 1024;
-    let mut current_size: u32 = 0;
+async fn setup_files(file_size_mb: u32) -> Result<u64> {
+    let target_size: u64 = (file_size_mb as u64) * 1024 * 1024;
+    let mut written: u64 = 0;
 
     let file = File::create(TEMP_FILE_NAME)
         .await
         .context("Temporary file could not be created")?;
     let mut writer = BufWriter::new(file);
     // Using a buffer to speed up writing for large files
-    const CHUNK_SIZE: u32 = 8192;
-    let mut buffer = [0u8; CHUNK_SIZE as usize];
+    const CHUNK_SIZE: usize = 8192;
+    let mut buffer = [0u8; CHUNK_SIZE];
 
-    while current_size < target_size {
-        let remaining: u32 = target_size - current_size;
-        let to_write: u32 = std::cmp::min(remaining, CHUNK_SIZE);
+    while written < target_size {
+        let remaining: u64 = target_size - written;
+        let to_write: usize = std::cmp::min(remaining as usize, CHUNK_SIZE);
 
-        rand::fill(&mut buffer[..to_write as usize]);
+        rand::fill(&mut buffer[..to_write]);
 
         writer
-            .write_all(&buffer[..to_write as usize])
+            .write_all(&buffer[..to_write])
             .await
             .context("Chunk could not be written")?;
-        current_size += to_write;
+        written += to_write as u64;
     }
     writer
         .flush()
         .await
         .context("Temporary file could not be flushed to disk")?;
 
-    Ok(current_size)
+    Ok(written)
 }
 
 /// Asynchronously uploads a file to an FTP server with optional throttling.
@@ -282,11 +279,16 @@ async fn main() -> Result<()> {
     pretty_env_logger::init();
 
     info!("Creating temporary file to send");
-    let file_size = setup_files().await?;
-    info!("File created, {} bytes", file_size);
+    let config = parse_config()?;
+    let file_size_bytes = setup_files(config.file_size_mb).await?;
+    info!("File created, {} bytes", file_size_bytes);
 
-    let config = config::parse_config()?;
-    let rlc = RateLimiterConfig::new(config.limiter, config.chunk, config.interval, config.mss);
+    let rlc = RateLimiterConfig::new(
+        config.limiter,
+        config.chunk_kb,
+        config.interval,
+        config.mss,
+    );
     let destination = Arc::new(format!("{}:21", config.target));
 
     let start_time = Instant::now();
