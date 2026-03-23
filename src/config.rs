@@ -123,10 +123,46 @@ impl ConfigBuilder {
             batches: self.batches.context("batches is required")?,
             tasks: self.tasks.context("tasks is required")?,
             delay: self.delay.context("delay is required")?,
-            limiter: self.limiter.context("limiter is required")?,
             file_size_mb: self.file_size_mb.context("file_size_mb is required")?,
-            chunk_kb: self.chunk_kb.context("chunk_kb is required")?,
-            interval: self.interval.context("interval is required")?,
+            limiter: self
+                .limiter
+                .context("limiter is required, set to false if no limiter is desired")?,
+            chunk_kb: {
+                match self.chunk_kb {
+                    Some(v) => {
+                        if self.limiter == Some(true) {
+                            if v == 0 {
+                                Err(anyhow::anyhow!(
+                                    "chunk_kb needs to be > 0 if limiter is true",
+                                ))
+                            } else {
+                                Ok(v)
+                            }
+                        } else {
+                            Ok(v)
+                        }
+                    }
+                    None => {
+                        if self.limiter == Some(true) {
+                            Err(anyhow::anyhow!("chunk_kb is required if limiter is true"))
+                        } else {
+                            Ok(0)
+                        }
+                    }
+                }?
+            },
+            interval: {
+                match self.interval {
+                    Some(v) => Ok(v),
+                    None => {
+                        if self.limiter == Some(true) {
+                            Err(anyhow::anyhow!("interval is required if limiter is true"))
+                        } else {
+                            Ok(0)
+                        }
+                    }
+                }?
+            },
             mss: self.mss.context("mss is required")?,
         })
     }
@@ -258,8 +294,29 @@ mod tests {
             target: Some("ftp.example.com".to_string()),
             batches: Some(10),
             tasks: Some(20),
-            delay: Some(5),
+            delay: None,
             limiter: Some(false),
+            file_size_mb: Some(10),
+            chunk_kb: Some(0),
+            interval: Some(0),
+            mss: Some(1460),
+        }
+        .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("is required"));
+    }
+
+    #[test]
+    fn test_missing_optional_field() {
+        // Override default with None to test validation
+        // interval is only required when a limiter is used
+        let result = ConfigBuilder {
+            target: Some("ftp.example.com".to_string()),
+            batches: Some(10),
+            tasks: Some(20),
+            delay: Some(5),
+            limiter: Some(true),
             file_size_mb: Some(10),
             chunk_kb: Some(4),
             interval: None,
@@ -269,5 +326,25 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("is required"));
+    }
+
+    #[test]
+    fn test_wrong_value() {
+        // if limiter is used, chunk size may not be zero
+        let result = ConfigBuilder {
+            target: Some("ftp.example.com".to_string()),
+            batches: Some(10),
+            tasks: Some(20),
+            delay: Some(5),
+            limiter: Some(true),
+            file_size_mb: Some(10),
+            chunk_kb: Some(0),
+            interval: Some(0),
+            mss: Some(1460),
+        }
+        .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("needs to be > 0"));
     }
 }
