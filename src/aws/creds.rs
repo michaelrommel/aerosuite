@@ -378,7 +378,7 @@ impl CachingAwsCredentialLoader {
                 if n >= Duration::from_secs(15 * 60) {
                     return Some(cached_credentials);
                 } else {
-                    warn!("credentials are expired");
+                    info!("credentials are expired or will be expiring soon, initiating renewal");
                 }
             }
         }

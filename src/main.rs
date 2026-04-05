@@ -14,7 +14,6 @@ mod metrics;
 mod signal;
 
 use log::{error, info};
-use std::process;
 
 #[cfg(feature = "tokio_console")]
 use std::net::SocketAddr;
@@ -25,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "tokio_console")]
     {
-        use anyhow::Context;
+        use anyhow::{Context, bail};
         use console_subscriber::ConsoleLayer;
         let console_addr: SocketAddr = "127.0.0.1:6669"
             .parse()
@@ -34,10 +33,7 @@ async fn main() -> anyhow::Result<()> {
         // Convert SocketAddr to the format expected by console_subscriber
         let (ip, port) = match console_addr {
             SocketAddr::V4(addr) => (addr.ip().octets(), addr.port()),
-            SocketAddr::V6(_) => {
-                error!("error: tokio-console only supports IPv4 addresses");
-                process::exit(1);
-            }
+            SocketAddr::V6(_) => bail!("tokio-console only supports IPv4 addresses"),
         };
 
         ConsoleLayer::builder()
@@ -47,10 +43,7 @@ async fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    if let Err(e) = run().await {
-        error!("\nerror: {}", e);
-        process::exit(1);
-    }
+    run().await?;
 
     Ok(())
 }
