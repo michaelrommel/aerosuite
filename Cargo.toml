@@ -50,3 +50,6 @@ lto = true        # Link-time optimization
 opt-level = "s"   # Optimize for size
 codegen-units = 1 # Better optimization at the cost of compile time
 
+[lints.rust]
+missing_docs = "warn"
+
