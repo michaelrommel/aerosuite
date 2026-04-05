@@ -262,9 +262,9 @@ pub async fn start_ftp(
     tokio::spawn(async move {
         let control_port = ControlPort::new(CONTROL_PORT);
         let addr = format!("{}:{}", FTP_ADDRESS, control_port.get());
-        info!("starting ftp server on {}", addr);
-        if let Err(e) = server.listen(addr).await {
-            error!("FTP server error: {}", e)
+        info!("starting ftp server on {}", &addr);
+        if let Err(e) = server.listen(addr.clone()).await {
+            error!("FTP server failed to listen on {}: {}", &addr, e);
         }
         debug!("FTP exiting");
         drop(done)

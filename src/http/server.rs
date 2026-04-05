@@ -204,6 +204,7 @@ impl HttpHandler {
     /// # Returns
     /// * `Ok(Response)` - A valid response (200 OK, 404 Not Found, or 405 Method Not Allowed)
     /// * `Err(http::Error)` - If there's an internal error constructing the response
+    #[must_use = "router result must be used to send HTTP response"]
     async fn router(
         &self,
         req: Request<Incoming>,
