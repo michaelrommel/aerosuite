@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "tokio_console")]
     {
-        use anyhow::{Context, bail};
+        use anyhow::{bail, Context};
         use console_subscriber::ConsoleLayer;
         let console_addr: SocketAddr = "127.0.0.1:6669"
             .parse()
@@ -36,11 +36,7 @@ async fn main() -> anyhow::Result<()> {
             SocketAddr::V6(_) => bail!("tokio-console only supports IPv4 addresses"),
         };
 
-        ConsoleLayer::builder()
-            // set the address the server is bound to
-            .server_addr((ip, port))
-            // ... other configurations ...
-            .init();
+        ConsoleLayer::builder().server_addr((ip, port)).init();
     }
 
     run().await?;
@@ -73,26 +69,38 @@ async fn run() -> anyhow::Result<()> {
 /// * `Ok(ExitSignal::Hup)` - Restart requested
 /// * `Ok(ExitSignal::Int|Term)` - Exit requested
 async fn main_task() -> anyhow::Result<signal::ExitSignal> {
-    let (shutdown_sender, http_receiver) = tokio::sync::broadcast::channel(1);
-    let (http_done_sender, mut shutdown_done_received) = tokio::sync::mpsc::channel(1);
+    const BROADCAST_CAPACITY: usize = 32;
+    const MPSC_CAPACITY: usize = 32;
+    const METRICS_BIND_ADDRESS: &str = "[::]:9090";
+
+    let (shutdown_sender, http_receiver) = tokio::sync::broadcast::channel(BROADCAST_CAPACITY);
+    let ftp_shutdown_sender = shutdown_sender.clone();
+    let ftp_shutdown_clone = ftp_shutdown_sender.clone();
+    let (http_done_sender, mut shutdown_done_received) = tokio::sync::mpsc::channel(MPSC_CAPACITY);
     let ftp_done_sender = http_done_sender.clone();
 
-    let addr = String::from("[::]:9090");
+    // Spawn HTTP metrics server
     tokio::spawn(async move {
-        if let Err(e) = http::start(&addr, http_receiver, http_done_sender).await {
-            error!("HTTP Server error: {}", e);
+        if let Err(e) = http::start(METRICS_BIND_ADDRESS, http_receiver, http_done_sender).await {
+            error!("\nHTTP Server error: {}", e);
         }
     });
 
-    ftp::start_ftp(shutdown_sender.subscribe(), ftp_done_sender).await?;
+    // Spawn FTP server
+    tokio::spawn(async move {
+        if let Err(e) = ftp::start_ftp(ftp_shutdown_clone.subscribe(), ftp_done_sender).await {
+            error!("\nFTP Server error: {}", e);
+        }
+    });
 
     let signal = signal::listen_for_signals().await?;
     info!("Received signal {}, shutting down...", signal);
 
+    // Drop all senders to trigger graceful shutdown of both servers
     drop(shutdown_sender);
+    drop(ftp_shutdown_sender);
 
-    // When every sender has gone out of scope, the recv call
-    // will return with an error. We ignore the error.
+    // Wait for HTTP server to complete shutdown (FTP uses same done channel)
     let _ = shutdown_done_received.recv().await;
 
     Ok(signal)
