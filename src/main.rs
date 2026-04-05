@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
     // We wait for a signal (HUP, INT, TERM). If the signal is a HUP,
     // we restart, otherwise we exit the loop and the program ends.
+    // any error should bubble up to the main function
     while main_task().await? == signal::ExitSignal::Hup {
         info!("Restarting on HUP");
     }
@@ -73,9 +74,9 @@ async fn main_task() -> anyhow::Result<signal::ExitSignal> {
     const MPSC_CAPACITY: usize = 32;
     const METRICS_BIND_ADDRESS: &str = "[::]:9090";
 
+    // Shutdown coordination channels
     let (shutdown_sender, http_receiver) = tokio::sync::broadcast::channel(BROADCAST_CAPACITY);
-    let ftp_shutdown_sender = shutdown_sender.clone();
-    let ftp_shutdown_clone = ftp_shutdown_sender.clone();
+    let ftp_shutdown_handle = shutdown_sender.clone();
     let (http_done_sender, mut shutdown_done_received) = tokio::sync::mpsc::channel(MPSC_CAPACITY);
     let ftp_done_sender = http_done_sender.clone();
 
@@ -87,21 +88,21 @@ async fn main_task() -> anyhow::Result<signal::ExitSignal> {
     });
 
     // Spawn FTP server
+    let ftp_shutdown_for_spawn = ftp_shutdown_handle.clone();
     tokio::spawn(async move {
-        if let Err(e) = ftp::start_ftp(ftp_shutdown_clone.subscribe(), ftp_done_sender).await {
+        if let Err(e) = ftp::start_ftp(ftp_shutdown_for_spawn.subscribe(), ftp_done_sender).await {
             error!("\nFTP Server error: {}", e);
         }
     });
 
-    let signal = signal::listen_for_signals().await?;
-    info!("Received signal {}, shutting down...", signal);
-
-    // Drop all senders to trigger graceful shutdown of both servers
-    drop(shutdown_sender);
-    drop(ftp_shutdown_sender);
-
-    // Wait for HTTP server to complete shutdown (FTP uses same done channel)
-    let _ = shutdown_done_received.recv().await;
-
-    Ok(signal)
+    match signal::listen_for_signals().await {
+        Ok(signal) => {
+            info!("Received signal {}, shutting down...", signal);
+            drop(shutdown_sender);
+            drop(ftp_shutdown_handle); // Remaining handle not moved into closure
+            let _ = shutdown_done_received.recv().await;
+            Ok(signal)
+        }
+        Err(e) => Err(e),
+    }
 }
