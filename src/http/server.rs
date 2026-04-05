@@ -188,7 +188,7 @@ pub async fn start(
 /// across multiple async tasks. The handler itself is stateless, so cloning the
 /// `Arc` only increments a reference counter (no heap allocation).
 #[derive(Clone)]
-pub(crate) struct HttpHandler {}
+struct HttpHandler {}
 
 impl HttpHandler {
     /// Routes incoming HTTP requests to the appropriate handler based on method and path.

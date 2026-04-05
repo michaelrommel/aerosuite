@@ -15,7 +15,7 @@ use unftp_sbe_opendal::OpendalStorage;
 ///
 /// # Security
 /// The control port is a well-known value (typically 21) and can be safely logged.
-pub struct ControlPort(u16);
+struct ControlPort(u16);
 
 impl ControlPort {
     /// Creates a new control port wrapper from a numeric port value.
@@ -61,11 +61,11 @@ impl std::fmt::Display for ControlPort {
 ///
 /// # Security
 /// The port range is a well-known value (typically 30000-49999) and can be safely logged.
-pub struct PassivePortRange {
+struct PassivePortRange {
     /// Start of the passive port range (inclusive).
-    pub start: u16,
+    start: u16,
     /// End of the passive port range (inclusive).
-    pub end: u16,
+    end: u16,
 }
 
 impl PassivePortRange {
