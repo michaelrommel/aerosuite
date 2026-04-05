@@ -1,5 +1,11 @@
 # AeroFTP - Agent Guidelines
 
+## General Tool Use
+
+When using the edit tool, you MUST provide parameters as flat strings. NEVER
+nest oldString or newString inside a secondary JSON object. Use the exact code
+block from the file for oldString.
+
 ## Build & Test Commands
 
 ### Core Commands

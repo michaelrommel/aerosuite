@@ -1,27 +1,196 @@
+use anyhow::Context;
 use libunftp::options::{ActivePassiveMode, PassiveHost};
 use opendal::{services::S3, Operator};
 use tokio::sync::mpsc;
 
 use crate::aws::CachingAwsCredentialLoader;
-use anyhow::Result;
 use log::{debug, error, info};
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
 
-const DEFAULT_REGION: &str = "eu-west-2";
-const DEFAULT_BUCKET: &str = "dev-s3-aeroftp";
-const FTP_ADDRESS: &str = "0.0.0.0:21";
+/// Type-safe wrapper for the FTP control port number.
+///
+/// This newtype ensures that control ports are always properly typed,
+/// preventing accidental confusion with data connection ports or other numeric values.
+///
+/// # Security
+/// The control port is a well-known value (typically 21) and can be safely logged.
+pub struct ControlPort(u16);
+
+impl ControlPort {
+    /// Creates a new control port wrapper from a numeric port value.
+    ///
+    /// # Arguments
+    /// * `port` - The FTP control port number (typically 21)
+    ///
+    /// # Examples
+    /// ```
+    /// use aeroftp::ftp::ControlPort;
+    ///
+    /// let port = ControlPort::new(21);
+    /// assert_eq!(port.get(), 21);
+    /// ```
+    pub fn new(port: u16) -> Self {
+        ControlPort(port)
+    }
+
+    /// Returns the underlying control port number as a `u16`.
+    ///
+    /// # Examples
+    /// ```
+    /// use aeroftp::ftp::ControlPort;
+    ///
+    /// let port = ControlPort::new(21);
+    /// assert_eq!(port.get(), 21);
+    /// ```
+    pub fn get(&self) -> u16 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ControlPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Type-safe wrapper for the passive port range used in FTP data connections.
+///
+/// This newtype ensures that port ranges are validated at construction time,
+/// preventing configuration errors where start > end.
+///
+/// # Security
+/// The port range is a well-known value (typically 30000-49999) and can be safely logged.
+pub struct PassivePortRange {
+    /// Start of the passive port range (inclusive).
+    pub start: u16,
+    /// End of the passive port range (inclusive).
+    pub end: u16,
+}
+
+impl PassivePortRange {
+    /// Creates a new passive port range with validation.
+    ///
+    /// This constructor validates that `start <= end` to prevent configuration errors.
+    /// The validation ensures the port range is usable before it's applied to the server.
+    ///
+    /// # Arguments
+    /// * `start` - The start of the passive port range (inclusive)
+    /// * `end` - The end of the passive port range (inclusive)
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// * The start port is greater than the end port (`start > end`)
+    ///
+    /// # Examples
+    /// ```
+    /// use aeroftp::ftp::PassivePortRange;
+    ///
+    /// // Valid range
+    /// let range = PassivePortRange::new(30000, 49999).unwrap();
+    /// assert_eq!(range.get(), (30000, 49999));
+    ///
+    /// // Invalid range - start > end
+    /// let invalid = PassivePortRange::new(50000, 30000);
+    /// assert!(invalid.is_err());
+    /// ```
+    pub fn new(start: u16, end: u16) -> anyhow::Result<Self> {
+        if start > end {
+            anyhow::bail!(
+                "Passive port range start ({}) cannot be greater than end ({})",
+                start,
+                end
+            );
+        }
+        Ok(PassivePortRange { start, end })
+    }
+
+    /// Returns the underlying port range as a tuple.
+    pub fn get(&self) -> (u16, u16) {
+        (self.start, self.end)
+    }
+}
+
+impl std::fmt::Display for PassivePortRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.start, self.end)
+    }
+}
+
+// this would allow us to listen on IPv4 and IPv6 simultaneously
+// however it creates problems with some dual stack clients
+// since we only route IPv4 addresses today, this is a safe choice
+// const FTP_ADDRESS: &str = "[::]";
+const FTP_ADDRESS: &str = "0.0.0.0";
+const CONTROL_PORT: u16 = 21;
 const PASSIVE_PORT_RANGE_START: u16 = 30000;
 const PASSIVE_PORT_RANGE_END: u16 = 49999;
 
+/// Default FTP session idle timeout in seconds (10 minutes).
+///
+/// Sessions that remain idle for longer than this duration will be terminated.
+/// This helps prevent resource exhaustion from zombie connections.
+const DEFAULT_IDLE_SESSION_TIMEOUT_SECS: u64 = 600;
+
+/// Grace period for graceful FTP server shutdown in seconds.
+///
+/// After receiving a shutdown signal, the server waits this duration to allow
+/// active sessions to complete before forcibly closing connections. This value
+/// is chosen to balance between giving users time to finish transfers and
+/// not keeping zombie processes running indefinitely.
+const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
+
+/// Starts the FTP server with AWS S3 backend storage.
+///
+/// This function initializes and starts an FTP server that:
+/// * Listens on port 21 for incoming FTP connections
+/// * Uses AWS S3 as the backend file storage via opendal
+/// * Authenticates users from a JSON credentials file (`credentials.json`)
+/// * Supports both active and passive FTP modes
+/// * Integrates with Prometheus metrics collection
+///
+/// # Configuration
+/// The server requires the following environment variables:
+/// * `AWS_S3_REGION` - AWS region (e.g., "eu-west-2")
+/// * `AWS_S3_BUCKET` - S3 bucket name (e.g., "my-ftp-bucket")
+///
+/// # Arguments
+/// * `shutdown` - A broadcast receiver that signals when the server should shut down gracefully
+/// * `done` - A channel sender that is dropped when the server task exits (for coordination)
+///
+/// # Returns
+/// * `Ok(())` - FTP server started successfully and running in background task
+/// # Errors
+/// Returns an error if:
+/// * The credentials file cannot be loaded or parsed
+/// * The S3 operator fails to initialize
+/// * Server builder configuration is invalid (e.g., port range issues)
+///
+/// # Examples
+/// ```no_run
+/// use aeroftp::ftp;
+/// use tokio::sync::{broadcast, mpsc};
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let (shutdown_sender, shutdown_receiver) = broadcast::channel(1);
+///     let (done_sender, _done_receiver) = mpsc::channel(1);
+///     
+///     // Start the FTP server
+///     ftp::start_ftp(shutdown_receiver, done_sender).await?;
+///     
+///     Ok(())
+/// }
+/// ```
+#[must_use = "FTP server startup result indicates success or failure"]
 pub async fn start_ftp(
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
     done: mpsc::Sender<()>,
-) -> Result<(), String> {
-    let caching_provider = CachingAwsCredentialLoader::new();
+) -> anyhow::Result<()> {
+    let caching_provider = CachingAwsCredentialLoader::default();
 
-    let region = std::env::var("AWS_S3_REGION").unwrap_or(DEFAULT_REGION.to_string());
-    let bucket = std::env::var("AWS_S3_BUCKET").unwrap_or(DEFAULT_BUCKET.to_string());
+    let region = std::env::var("AWS_S3_REGION")?;
+    let bucket = std::env::var("AWS_S3_BUCKET")?;
 
     let builder = S3::default()
         .customized_credential_load(Box::new(caching_provider))
@@ -30,16 +199,14 @@ pub async fn start_ftp(
         .bucket(&bucket)
         .root("/");
 
-    // 2. Initialize the Operator
-    let op: Operator = Operator::new(builder)
-        .map_err(|e| format!("Could not build operator: {}", e))?
-        .finish();
+    // Initialize the Operator
+    let op: Operator = Operator::new(builder)?.finish();
 
     // Wrap the operator with `OpendalStorage`
     let backend = OpendalStorage::new(op);
 
-    let authenticator = JsonFileAuthenticator::from_file(String::from("credentials.json"))
-        .map_err(|e| format!("Could not load credentials file: {}", e))?;
+    let authenticator = JsonFileAuthenticator::from_file("credentials.json")
+        .map_err(|e| anyhow::anyhow!("could not load credentials file: {}", e))?;
 
     // Build the actual unftp server, this could be used to create two separate
     // IPv4 and IPv6 servers with different settings
@@ -52,14 +219,15 @@ pub async fn start_ftp(
     //     .shutdown_indicator(async move {
     //         shutdown4.recv().await.ok();
     //         println!("Shutting down FTP server");
-    //         libunftp::options::Shutdown::new().grace_period(Duration::from_secs(11))
+    //         libunftp::options::Shutdown::new().grace_period(std::time::Duration::from_secs(
+    //             DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS,
+    //         ))
     //     })
+    //     .idle_session_timeout(DEFAULT_IDLE_SESSION_TIMEOUT_SECS)
     //     .passive_host(libunftp::options::PassiveHost::FromConnection)
     //     .metrics()
     //     .build()
     //     .map_err(|e| format!("Could not build server: {}", e))?;
-
-    // // Start the v4 server
     // tokio::spawn(async move {
     //     let addr = "0.0.0.0:2121";
     //     println!("Starting ftp server on {}", addr);
@@ -70,30 +238,33 @@ pub async fn start_ftp(
     //     drop(done4)
     // });
 
+    let passive_port_range =
+        PassivePortRange::new(PASSIVE_PORT_RANGE_START, PASSIVE_PORT_RANGE_END)
+            .context("Invalid passive port range configuration")?;
+
     let server = libunftp::ServerBuilder::new(Box::new(move || backend.clone()))
         .authenticator(std::sync::Arc::new(authenticator))
         .shutdown_indicator(async move {
             shutdown.recv().await.ok();
-            debug!("Shutting down FTP server");
-            libunftp::options::Shutdown::new().grace_period(std::time::Duration::from_secs(11))
+            debug!("shutting down FTP server");
+            libunftp::options::Shutdown::new().grace_period(std::time::Duration::from_secs(
+                DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS,
+            ))
         })
-        .idle_session_timeout(600)
-        // .proxy_protocol_mode(21)
+        .idle_session_timeout(DEFAULT_IDLE_SESSION_TIMEOUT_SECS)
+        // .proxy_protocol_mode(ControlPort::new(CONTROL_PORT).get())
         .active_passive_mode(ActivePassiveMode::ActiveAndPassive)
         .passive_host(PassiveHost::FromConnection)
-        .passive_ports(PASSIVE_PORT_RANGE_START..=PASSIVE_PORT_RANGE_END)
+        .passive_ports(passive_port_range.get().0..=passive_port_range.get().1)
         .metrics()
-        .build()
-        .map_err(|e| format!("Could not build server: {}", e))?;
+        .build()?;
 
     tokio::spawn(async move {
-        // this allows us to listen on IPv4 and IPv6 simultaneously
-        //let addr = "[::]:21";
-        // this is now IPv4 only
-        let addr = FTP_ADDRESS;
-        info!("Starting ftp server on {}", addr);
+        let control_port = ControlPort::new(CONTROL_PORT);
+        let addr = format!("{}:{}", FTP_ADDRESS, control_port.get());
+        info!("starting ftp server on {}", addr);
         if let Err(e) = server.listen(addr).await {
-            error!("FTP server error: {:?}", e)
+            error!("FTP server error: {}", e)
         }
         debug!("FTP exiting");
         drop(done)

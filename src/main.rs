@@ -13,29 +13,29 @@ mod http;
 mod metrics;
 mod signal;
 
-#[cfg(feature = "tokio_console")]
-use std::net::SocketAddr;
-
 use log::{error, info};
 use std::process;
 
+#[cfg(feature = "tokio_console")]
+use std::net::SocketAddr;
+
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
 
     #[cfg(feature = "tokio_console")]
     {
+        use anyhow::Context;
         use console_subscriber::ConsoleLayer;
         let console_addr: SocketAddr = "127.0.0.1:6669"
             .parse()
-            .map_err(|e| format!("could not parse tokio-console address: {}", e))
-            .unwrap();
+            .context("could not parse tokio-console address")?;
 
         // Convert SocketAddr to the format expected by console_subscriber
         let (ip, port) = match console_addr {
             SocketAddr::V4(addr) => (addr.ip().octets(), addr.port()),
             SocketAddr::V6(_) => {
-                eprintln!("Error: tokio-console only supports IPv4 addresses");
+                error!("error: tokio-console only supports IPv4 addresses");
                 process::exit(1);
             }
         };
@@ -48,12 +48,21 @@ async fn main() {
     }
 
     if let Err(e) = run().await {
-        error!("\nError: {}", e);
+        error!("\nerror: {}", e);
         process::exit(1);
-    };
+    }
+
+    Ok(())
 }
 
-async fn run() -> Result<(), String> {
+/// Execute the main application loop.
+///
+/// Spawns the HTTP metrics server, starts the FTP server, and listens for
+/// signals. Restarts on HUP signal, exits on INT/TERM.
+///
+/// # Returns
+/// * `Ok(())` - Application exited normally
+async fn run() -> anyhow::Result<()> {
     // We wait for a signal (HUP, INT, TERM). If the signal is a HUP,
     // we restart, otherwise we exit the loop and the program ends.
     while main_task().await? == signal::ExitSignal::Hup {
@@ -63,9 +72,14 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
-async fn main_task() -> Result<signal::ExitSignal, String> {
-    use anyhow::Error;
-
+/// Execute one iteration of the main task.
+///
+/// Starts HTTP metrics server, FTP server, and waits for signals.
+///
+/// # Returns
+/// * `Ok(ExitSignal::Hup)` - Restart requested
+/// * `Ok(ExitSignal::Int|Term)` - Exit requested
+async fn main_task() -> anyhow::Result<signal::ExitSignal> {
     let (shutdown_sender, http_receiver) = tokio::sync::broadcast::channel(1);
     let (http_done_sender, mut shutdown_done_received) = tokio::sync::mpsc::channel(1);
     let ftp_done_sender = http_done_sender.clone();
@@ -79,9 +93,7 @@ async fn main_task() -> Result<signal::ExitSignal, String> {
 
     ftp::start_ftp(shutdown_sender.subscribe(), ftp_done_sender).await?;
 
-    let signal = signal::listen_for_signals()
-        .await
-        .map_err(|e: Error| e.to_string())?;
+    let signal = signal::listen_for_signals().await?;
     info!("Received signal {}, shutting down...", signal);
 
     drop(shutdown_sender);
