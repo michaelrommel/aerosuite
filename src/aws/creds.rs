@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Error};
 use chrono::{DateTime, TimeZone, Utc};
-use log::{debug, info, trace, warn};
+use log::{debug, info, trace};
 use reqsign::AwsCredential;
 use reqwest::Client;
 use serde::Deserialize;
