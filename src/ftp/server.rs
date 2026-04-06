@@ -134,9 +134,7 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 /// }
 /// ```
 #[must_use = "FTP server startup result indicates success or failure"]
-pub async fn start_ftp(
-    mut shutdown: tokio::sync::broadcast::Receiver<()>,
-) -> anyhow::Result<()> {
+pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<()> {
     let caching_provider = CachingAwsCredentialLoader::default();
 
     let region = std::env::var("AWS_S3_REGION")?;
