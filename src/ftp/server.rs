@@ -1,7 +1,6 @@
 use anyhow::Context;
 use libunftp::options::{ActivePassiveMode, PassiveHost};
 use opendal::{services::S3, Operator};
-use tokio::sync::mpsc;
 
 use crate::aws::CachingAwsCredentialLoader;
 use log::{debug, error, info};
@@ -110,7 +109,6 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 ///
 /// # Arguments
 /// * `shutdown` - A broadcast receiver that signals when the server should shut down gracefully
-/// * `done` - A channel sender that is dropped when the server task exits (for coordination)
 ///
 /// # Returns
 /// * `Ok(())` - FTP server started successfully and running in background task
@@ -123,15 +121,14 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 /// # Examples
 /// ```no_run
 /// use aeroftp::ftp;
-/// use tokio::sync::{broadcast, mpsc};
+/// use tokio::sync::{broadcast};
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
 ///     let (shutdown_sender, shutdown_receiver) = broadcast::channel(1);
-///     let (done_sender, _done_receiver) = mpsc::channel(1);
 ///     
 ///     // Start the FTP server
-///     ftp::start_ftp(shutdown_receiver, done_sender).await?;
+///     ftp::start_ftp(shutdown_receiver).await?;
 ///     
 ///     Ok(())
 /// }
@@ -139,7 +136,6 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 #[must_use = "FTP server startup result indicates success or failure"]
 pub async fn start_ftp(
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    done: mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
     let caching_provider = CachingAwsCredentialLoader::default();
 
@@ -161,36 +157,6 @@ pub async fn start_ftp(
 
     let authenticator = JsonFileAuthenticator::from_file("credentials.json")
         .map_err(|e| anyhow::anyhow!("could not load credentials file: {}", e))?;
-
-    // Build the actual unftp server, this could be used to create two separate
-    // IPv4 and IPv6 servers with different settings
-    // let auth4 = authenticator.clone();
-    // let backend4 = backend.clone();
-    // let mut shutdown4 = shutdown.resubscribe();
-    // let done4 = done.clone();
-    // let server4 = libunftp::ServerBuilder::new(Box::new(move || backend4.clone()))
-    //     .authenticator(Arc::new(auth4))
-    //     .shutdown_indicator(async move {
-    //         shutdown4.recv().await.ok();
-    //         println!("Shutting down FTP server");
-    //         libunftp::options::Shutdown::new().grace_period(std::time::Duration::from_secs(
-    //             DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS,
-    //         ))
-    //     })
-    //     .idle_session_timeout(DEFAULT_IDLE_SESSION_TIMEOUT_SECS)
-    //     .passive_host(libunftp::options::PassiveHost::FromConnection)
-    //     .metrics()
-    //     .build()
-    //     .map_err(|e| format!("Could not build server: {}", e))?;
-    // tokio::spawn(async move {
-    //     let addr = "0.0.0.0:2121";
-    //     println!("Starting ftp server on {}", addr);
-    //     if let Err(e) = server4.listen(addr).await {
-    //         println!("FTP server error: {:?}", e)
-    //     }
-    //     println!("FTP exiting");
-    //     drop(done4)
-    // });
 
     let passive_port_range =
         PassivePortRange::new(PASSIVE_PORT_RANGE_START, PASSIVE_PORT_RANGE_END)
@@ -220,7 +186,6 @@ pub async fn start_ftp(
             error!("FTP server failed to listen on {}: {}", &addr, e);
         }
         debug!("FTP exiting");
-        drop(done)
     });
 
     Ok(())
