@@ -357,6 +357,329 @@ mod tests {
             // All should return None (empty cache)
             assert!(results.iter().all(|r: &Option<AwsCreds>| r.is_none()));
         }
+
+        #[tokio::test]
+        async fn test_concurrent_write_access() {
+            let loader = CachingAwsCredentialLoader::new();
+
+            // Spawn multiple concurrent writers using Arc clone
+            let loader_arc = std::sync::Arc::new(loader);
+            let handles: Vec<_> = (0..10)
+                .map(|i| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        // Each task writes a unique key ID
+                        let creds = AwsCreds::new(
+                            String::new(),
+                            AccessKeyId::new(format!("KEY{:03}", i)),
+                            SecretAccessKey::new(String::from("secret")),
+                            SessionToken::new(String::from("token")),
+                            "2030-12-31T23:59:59Z".to_string(),
+                        );
+
+                        {
+                            let mut guard = loader_clone.credentials.write().await;
+                            *guard = creds.clone();
+                        }
+
+                        // Small delay to increase chance of interleaving with other tasks,
+                        // simulating real-world scenarios where there's a gap between update and consumption
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+
+                        // Verify we can read back a valid value (not necessarily what this task wrote)
+                        let read_creds = loader_clone.credentials.read().await;
+                        assert!(
+                            read_creds.access_key_id().as_str().starts_with("KEY"),
+                            "Expected valid key format after concurrent writes, got {}",
+                            read_creds.access_key_id()
+                        );
+                    })
+                })
+                .collect();
+
+            // Wait for all tasks to complete and collect results
+            let mut errors = Vec::new();
+            for handle in handles {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => errors.push(format!("Task panicked: {}", e)),
+                }
+            }
+
+            // All tasks should complete without panics
+            assert!(errors.is_empty(), "Concurrent writes failed: {:?}", errors);
+        }
+
+        #[tokio::test]
+        async fn test_concurrent_mixed_read_write() {
+            let loader = CachingAwsCredentialLoader::new();
+
+            // Spawn multiple concurrent writers and readers using Arc clone
+            let loader_arc = std::sync::Arc::new(loader);
+            let writer_handles: Vec<_> = (0..5)
+                .map(|i| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        // Each writer updates with a unique key
+                        let creds = AwsCreds::new(
+                            String::new(),
+                            AccessKeyId::new(format!("WRITER{:02}", i)),
+                            SecretAccessKey::new(String::from("secret")),
+                            SessionToken::new(String::from("token")),
+                            "2030-12-31T23:59:59Z".to_string(),
+                        );
+
+                        {
+                            let mut guard = loader_clone.credentials.write().await;
+                            *guard = creds.clone();
+                        }
+                    })
+                })
+                .collect();
+
+            let reader_handles: Vec<_> = (0..5)
+                .map(|_| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        // Readers just check cache multiple times
+                        for _ in 0..3 {
+                            let _cache = loader_clone.cache_check().await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                })
+                .collect();
+
+            // Wait for all writer tasks to complete first
+            for handle in writer_handles {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => panic!("Writer task panicked: {}", e),
+                }
+            }
+
+            // Then wait for reader tasks
+            for handle in reader_handles {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => panic!("Reader task panicked: {}", e),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_concurrent_cache_check_during_writes() {
+            use std::time::Duration;
+
+            let loader = CachingAwsCredentialLoader::new();
+
+            // First, set up initial credentials so cache_check doesn't return None
+            let init_creds = AwsCreds::new(
+                String::new(),
+                AccessKeyId::new("INITIAL".to_string()),
+                SecretAccessKey::new(String::from("secret")),
+                SessionToken::new(String::from("token")),
+                "2030-12-31T23:59:59Z".to_string(),
+            );
+            {
+                let mut guard = loader.credentials.write().await;
+                *guard = init_creds.clone();
+            }
+
+            // Spawn concurrent cache_check readers that run continuously
+            let loader_arc = std::sync::Arc::new(loader);
+            let reader_handles: Vec<_> = (0..3)
+                .map(|i| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        // Each reader performs multiple cache checks
+                        for j in 0..10 {
+                            let result = loader_clone.cache_check().await;
+                            assert!(
+                                result.is_some(),
+                                "Reader {} iteration {}: expected Some, got None",
+                                i,
+                                j
+                            );
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                })
+                .collect();
+
+            // Meanwhile, writers keep updating the credentials
+            let write_handles: Vec<_> = (0..3)
+                .map(|j| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        for i in 0..10 {
+                            let creds = AwsCreds::new(
+                                String::new(),
+                                AccessKeyId::new(format!("UPDATE_{:02}_{:02}", j, i)),
+                                SecretAccessKey::new(String::from("secret")),
+                                SessionToken::new(String::from("token")),
+                                "2030-12-31T23:59:59Z".to_string(),
+                            );
+
+                            {
+                                let mut guard = loader_clone.credentials.write().await;
+                                *guard = creds.clone();
+                            }
+                            tokio::time::sleep(Duration::from_millis(6)).await;
+                        }
+                    })
+                })
+                .collect();
+
+            // Wait for all writers to complete
+            for handle in write_handles {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => panic!("Writer task panicked: {}", e),
+                }
+            }
+
+            // Wait for all readers to complete
+            for handle in reader_handles {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => panic!("Reader task panicked: {}", e),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn test_racing_provision_from_empty() {
+            use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+            let loader = CachingAwsCredentialLoader::new();
+            let loader_arc = std::sync::Arc::new(loader);
+
+            // Ensure cache is empty (should be by default)
+            assert!(loader_arc.cache_check().await.is_none());
+
+            // Spawn multiple tasks that would all try to provision simultaneously
+            // We simulate this by directly writing fresh credentials from different "sources"
+            let handles: Vec<_> = (0..5)
+                .map(|source_id| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        // Simulate fetching credentials from different sources
+                        let expiry_time = SystemTime::now() + Duration::from_secs(3600);
+                        let iso_string = Utc
+                            .timestamp_opt(
+                                expiry_time.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+                                0,
+                            )
+                            .single()
+                            .unwrap()
+                            .to_rfc3339();
+
+                        let creds = AwsCreds::new(
+                            String::from("arn:aws:iam::123456789012:role/source-"),
+                            AccessKeyId::new(format!("SOURCE{:02}", source_id)),
+                            SecretAccessKey::new(String::from("secret")),
+                            SessionToken::new(String::from("token")),
+                            iso_string,
+                        );
+
+                        // Write to shared credentials
+                        {
+                            let mut guard = loader_clone.credentials.write().await;
+                            *guard = creds.clone();
+                        }
+                    })
+                })
+                .collect();
+
+            // Wait for all tasks to complete
+            for handle in handles {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => panic!("Task panicked: {}", e),
+                }
+            }
+
+            // Final state should have valid credentials from one of the sources
+            let final_creds = loader_arc.cache_check().await;
+            assert!(
+                final_creds.is_some(),
+                "Expected cached credentials after concurrent writes"
+            );
+
+            let final_access_key: String =
+                final_creds.unwrap().access_key_id().as_str().to_string();
+            // Ensure all tasks completed before checking
+            assert!(
+                final_access_key.starts_with("SOURCE"),
+                "Expected access key to start with SOURCE, got {}",
+                final_access_key
+            );
+        }
+
+        #[tokio::test]
+        async fn test_stress_concurrent_readers() {
+            use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+            let loader = CachingAwsCredentialLoader::new();
+
+            // Pre-populate with valid credentials so cache_check returns Some
+            let expiry_time = SystemTime::now() + Duration::from_secs(3600);
+            let iso_string = Utc
+                .timestamp_opt(
+                    expiry_time.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+                    0,
+                )
+                .single()
+                .unwrap()
+                .to_rfc3339();
+
+            let creds = AwsCreds::new(
+                String::from("arn:aws:iam::123456789012:role/stress-test"),
+                AccessKeyId::new("STRESSKEY1234567890ABCDEF".to_string()),
+                SecretAccessKey::new(String::from("secret")),
+                SessionToken::new(String::from("token")),
+                iso_string,
+            );
+
+            {
+                let mut guard = loader.credentials.write().await;
+                *guard = creds.clone();
+            }
+
+            // Spawn a large number of concurrent readers
+            let num_readers = 50;
+            let loader_arc = std::sync::Arc::new(loader);
+            let handles: Vec<_> = (0..num_readers)
+                .map(|i| {
+                    let loader_clone = std::sync::Arc::clone(&loader_arc);
+                    tokio::spawn(async move {
+                        // Each reader performs multiple cache checks
+                        for j in 0..20 {
+                            let result = loader_clone.cache_check().await;
+                            assert!(
+                                result.is_some(),
+                                "Reader {} iteration {}: expected Some, got None",
+                                i,
+                                j
+                            );
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                })
+                .collect();
+
+            // Wait for all readers to complete
+            let mut errors = Vec::new();
+            for (i, handle) in handles.into_iter().enumerate() {
+                match handle.await {
+                    Ok(_) => {}
+                    Err(e) => errors.push(format!("Reader {} panicked: {}", i, e)),
+                }
+            }
+
+            assert!(errors.is_empty(), "Concurrent readers failed: {:?}", errors);
+        }
     }
 
     /// Tests for credential provisioning logic
