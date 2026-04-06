@@ -83,7 +83,6 @@ impl std::fmt::Display for Endpoint {
 /// # Arguments
 /// * `bind_addr` - The socket address to bind the HTTP server to (e.g., `[::]:9090`)
 /// * `shutdown` - A broadcast receiver that signals when the server should shut down gracefully
-/// * `done` - A channel sender that is dropped when the server exits (for coordination with other components)
 ///
 /// # Returns
 /// * `Ok(())` - Server started and eventually shut down cleanly
@@ -92,15 +91,14 @@ impl std::fmt::Display for Endpoint {
 /// # Examples
 /// ```no_run
 /// use aeroftp::http;
-/// use tokio::sync::{broadcast, mpsc};
+/// use tokio::sync::{broadcast};
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
 ///     let (shutdown_sender, shutdown_receiver) = broadcast::channel(1);
-///     let (done_sender, _done_receiver) = mpsc::channel(1);
 ///     
 ///     // Start HTTP metrics server
-///     http::start("[::]:9090", shutdown_receiver, done_sender).await?;
+///     http::start("[::]:9090", shutdown_receiver).await?;
 ///     
 ///     Ok(())
 /// }
@@ -108,7 +106,6 @@ impl std::fmt::Display for Endpoint {
 pub async fn start(
     bind_addr: &str,
     mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    done: tokio::sync::mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
     let http_addr: SocketAddr = bind_addr
         .parse()
@@ -173,7 +170,6 @@ pub async fn start(
         }
     }
 
-    drop(done);
     Ok(())
 }
 

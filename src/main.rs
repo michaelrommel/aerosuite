@@ -13,7 +13,8 @@ mod http;
 mod metrics;
 mod signal;
 
-use log::{error, info};
+use log::{error, info, warn};
+use tokio::task::JoinSet;
 
 #[cfg(feature = "tokio_console")]
 use std::net::SocketAddr;
@@ -71,38 +72,47 @@ async fn run() -> anyhow::Result<()> {
 /// * `Ok(ExitSignal::Int|Term)` - Exit requested
 async fn main_task() -> anyhow::Result<signal::ExitSignal> {
     const BROADCAST_CAPACITY: usize = 32;
-    const MPSC_CAPACITY: usize = 32;
     const METRICS_BIND_ADDRESS: &str = "[::]:9090";
 
     // Shutdown coordination channels
     let (shutdown_sender, http_receiver) = tokio::sync::broadcast::channel(BROADCAST_CAPACITY);
     let ftp_shutdown_handle = shutdown_sender.clone();
-    let (http_done_sender, mut shutdown_done_received) = tokio::sync::mpsc::channel(MPSC_CAPACITY);
-    let ftp_done_sender = http_done_sender.clone();
+
+    // Use JoinSet for structured concurrency - tracks both server tasks
+    let mut join_set = JoinSet::<()>::new();
 
     // Spawn HTTP metrics server
-    tokio::spawn(async move {
-        if let Err(e) = http::start(METRICS_BIND_ADDRESS, http_receiver, http_done_sender).await {
-            error!("\nHTTP Server error: {}", e);
+    join_set.spawn(async move {
+        if let Err(e) = http::start(METRICS_BIND_ADDRESS, http_receiver).await {
+            error!("HTTP Server error: {}", e);
         }
     });
 
-    // Spawn FTP server
-    let ftp_shutdown_for_spawn = ftp_shutdown_handle.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ftp::start_ftp(ftp_shutdown_for_spawn.subscribe(), ftp_done_sender).await {
-            error!("\nFTP Server error: {}", e);
+    // Spawn FTP server with its own shutdown receiver
+    join_set.spawn(async move {
+        if let Err(e) = ftp::start_ftp(ftp_shutdown_handle.subscribe()).await {
+            error!("FTP Server error: {}", e);
         }
     });
 
     match signal::listen_for_signals().await {
         Ok(signal) => {
             info!("Received signal {}, shutting down...", signal);
-            drop(shutdown_sender);
-            drop(ftp_shutdown_handle); // Remaining handle not moved into closure
-            let _ = shutdown_done_received.recv().await;
+            drop(shutdown_sender); // Signal both servers to stop
+
+            // Wait for all spawned tasks to complete with timeout
+            while let Some(result) = join_set.join_next().await {
+                if let Err(e) = result {
+                    warn!("Server task cancelled or panicked: {}", e);
+                }
+            }
+
             Ok(signal)
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            // Ensure servers receive shutdown signal even on error
+            drop(shutdown_sender);
+            Err(e)
+        }
     }
 }
