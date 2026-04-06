@@ -76,6 +76,12 @@ impl From<String> for AccessKeyId {
     }
 }
 
+impl From<&str> for AccessKeyId {
+    fn from(s: &str) -> Self {
+        AccessKeyId::new(s.to_string())
+    }
+}
+
 /// Type-safe wrapper for AWS secret access keys.
 ///
 /// This newtype ensures that secret access keys are always properly wrapped
@@ -134,6 +140,12 @@ impl From<String> for SecretAccessKey {
     }
 }
 
+impl From<&str> for SecretAccessKey {
+    fn from(s: &str) -> Self {
+        SecretAccessKey::new(s.to_string())
+    }
+}
+
 /// Type-safe wrapper for AWS session tokens.
 ///
 /// This newtype ensures that session tokens are always properly wrapped,
@@ -183,6 +195,12 @@ impl From<String> for SessionToken {
     }
 }
 
+impl From<&str> for SessionToken {
+    fn from(s: &str) -> Self {
+        SessionToken::new(s.to_string())
+    }
+}
+
 /// Structured representation of AWS credentials from metadata services.
 ///
 /// This type wraps raw credential strings in typed wrappers for improved
@@ -193,26 +211,26 @@ impl From<String> for SessionToken {
 /// * All fields are properly typed to prevent mixing with other string values
 /// * Deserialization from AWS metadata services is automatic via serde
 #[derive(Deserialize, Clone)]
-pub struct AwsCreds {
+pub(crate) struct AwsCreds {
     /// The ARN of the IAM role.
     #[serde(skip_deserializing, default = "default_role_arn")]
-    pub role_arn: String,
+    role_arn: String,
 
     /// The access key ID.
     #[serde(rename = "AccessKeyId")]
-    pub access_key_id: AccessKeyId,
+    access_key_id: AccessKeyId,
 
     /// The secret access key - never displayed in logs or debug output.
     #[serde(rename = "SecretAccessKey")]
-    pub secret_access_key: SecretAccessKey,
+    secret_access_key: SecretAccessKey,
 
     /// The session token.
     #[serde(rename = "Token")]
-    pub session_token: SessionToken,
+    session_token: SessionToken,
 
     /// The expiration time in RFC3339 format.
     #[serde(rename = "Expiration")]
-    pub expiration: String,
+    expiration: String,
 }
 
 /// Returns an empty string as default for role ARN.
@@ -238,27 +256,30 @@ impl Default for AwsCreds {
 impl std::fmt::Debug for AwsCreds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AwsCreds")
-            .field("role_arn", &self.role_arn)
-            .field("access_key_id", &self.access_key_id.as_str())
+            .field("role_arn", &self.role_arn())
+            .field("access_key_id", &self.access_key_id().as_str())
             .field("secret_access_key", &"[REDACTED]")
             .field("session_token", &"[REDACTED]")
-            .field("expiration", &self.expiration)
+            .field("expiration", &self.expiration())
             .finish()
     }
 }
 
-/// AWS credentials structure from EC2 Metadata Service response (internal).
+/// AWS credentials structure from EC2 Metadata Service response.
 #[derive(Deserialize, Debug)]
-struct Ec2Creds {
+pub(crate) struct Ec2Creds {
     /// The status code of the request.
+    #[serde(default)]
     #[allow(dead_code)]
     code: String,
 
     /// The last update timestamp.
+    #[serde(default)]
     #[allow(dead_code)]
     last_updated: String,
 
     /// The credential type.
+    #[serde(default)]
     #[allow(dead_code)]
     #[serde(rename = "Type")]
     r#type: String,
@@ -280,7 +301,68 @@ struct Ec2Creds {
     expiration: String,
 }
 
+impl Ec2Creds {
+    /// Returns the access key ID.
+    pub fn access_key_id(&self) -> &str {
+        &self.access_key_id
+    }
+
+    /// Returns the secret access key.
+    pub fn secret_access_key(&self) -> &str {
+        &self.secret_access_key
+    }
+
+    /// Returns the session token.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Returns the expiration time.
+    pub fn expiration(&self) -> &str {
+        &self.expiration
+    }
+
+    /// Returns the status code.
+    #[allow(dead_code)]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Returns the last_updated time.
+    #[allow(dead_code)]
+    pub fn last_updated(&self) -> &str {
+        &self.last_updated
+    }
+
+    /// Returns the credential type.
+    #[allow(dead_code)]
+    pub fn cred_type(&self) -> &str {
+        &self.r#type
+    }
+}
+
 impl AwsCreds {
+    /// Creates a new `AwsCreds` instance with the given values.
+    ///
+    /// This constructor is useful for testing and creating credential objects
+    /// without going through deserialization.
+    #[cfg(test)]
+    pub fn new(
+        role_arn: String,
+        access_key_id: AccessKeyId,
+        secret_access_key: SecretAccessKey,
+        session_token: SessionToken,
+        expiration: String,
+    ) -> Self {
+        Self {
+            role_arn,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            expiration,
+        }
+    }
+
     /// Parses the expiration string and returns the expiry time.
     ///
     /// # Returns
@@ -294,6 +376,31 @@ impl AwsCreds {
                 .ok()
                 .map(Into::into)
         }
+    }
+
+    /// Returns the IAM role ARN.
+    pub fn role_arn(&self) -> &str {
+        &self.role_arn
+    }
+
+    /// Returns the access key ID.
+    pub fn access_key_id(&self) -> &AccessKeyId {
+        &self.access_key_id
+    }
+
+    /// Returns the secret access key.
+    pub fn secret_access_key(&self) -> &SecretAccessKey {
+        &self.secret_access_key
+    }
+
+    /// Returns the session token.
+    pub fn session_token(&self) -> &SessionToken {
+        &self.session_token
+    }
+
+    /// Returns the expiration time in RFC3339 format.
+    pub fn expiration(&self) -> &str {
+        &self.expiration
     }
 }
 
@@ -412,7 +519,7 @@ impl CachingAwsCredentialLoader {
     ///     let client = Client::new();
     ///     
     ///     match loader.get_ec2_credentials(client).await {
-    ///         Ok(creds) => println!("Fetched credentials: {}", creds.access_key_id.as_str()),
+    ///         Ok(creds) => println!("Fetched credentials: {}", creds.access_key_id().as_str()),
     ///         Err(e) => eprintln!("Failed to fetch credentials: {}", e),
     ///     }
     ///     
@@ -452,10 +559,10 @@ impl CachingAwsCredentialLoader {
 
         Ok(AwsCreds {
             role_arn: String::new(),
-            access_key_id: AccessKeyId::from(credentials.access_key_id),
-            secret_access_key: SecretAccessKey::from(credentials.secret_access_key),
-            session_token: SessionToken::from(credentials.token),
-            expiration: credentials.expiration,
+            access_key_id: AccessKeyId::from(credentials.access_key_id()),
+            secret_access_key: SecretAccessKey::from(credentials.secret_access_key()),
+            session_token: SessionToken::from(credentials.token()),
+            expiration: credentials.expiration().to_string(),
         })
     }
 
@@ -486,7 +593,7 @@ impl CachingAwsCredentialLoader {
     ///     let url = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI")?;
     ///     
     ///     match loader.get_ecs_credentials(client, url).await {
-    ///         Ok(creds) => println!("Fetched credentials: {}", creds.access_key_id.as_str()),
+    ///         Ok(creds) => println!("Fetched credentials: {}", creds.access_key_id().as_str()),
     ///         Err(e) => eprintln!("Failed to fetch credentials: {}", e),
     ///     }
     ///     
@@ -510,10 +617,10 @@ impl CachingAwsCredentialLoader {
 
         Ok(AwsCreds {
             role_arn: String::new(),
-            access_key_id: AccessKeyId::from(ec2_creds.access_key_id),
-            secret_access_key: SecretAccessKey::from(ec2_creds.secret_access_key),
-            session_token: SessionToken::from(ec2_creds.token),
-            expiration: ec2_creds.expiration,
+            access_key_id: AccessKeyId::from(ec2_creds.access_key_id()),
+            secret_access_key: SecretAccessKey::from(ec2_creds.secret_access_key()),
+            session_token: SessionToken::from(ec2_creds.token()),
+            expiration: ec2_creds.expiration().to_string(),
         })
     }
 
@@ -545,7 +652,7 @@ impl CachingAwsCredentialLoader {
     ///     let client = Client::new();
     ///     
     ///     match loader.provision_credentials(client).await {
-    ///         Ok(creds) => println!("Provisioned credentials: {}", creds.access_key_id.as_str()),
+    ///         Ok(creds) => println!("Provisioned credentials: {}", creds.access_key_id().as_str()),
     ///         Err(e) => eprintln!("Failed to provision credentials: {}", e),
     ///     }
     ///     
@@ -605,9 +712,9 @@ impl reqsign::AwsCredentialLoad for CachingAwsCredentialLoader {
             .single();
         // struct AwsCredential is what the reqsign crate expects
         Ok(Some(AwsCredential {
-            access_key_id: credentials.access_key_id.as_str().to_string(),
-            secret_access_key: credentials.secret_access_key.as_str().to_string(),
-            session_token: Some(credentials.session_token.as_str().to_string()),
+            access_key_id: credentials.access_key_id().as_str().to_string(),
+            secret_access_key: credentials.secret_access_key().as_str().to_string(),
+            session_token: Some(credentials.session_token().as_str().to_string()),
             expires_in: expiry,
         }))
     }

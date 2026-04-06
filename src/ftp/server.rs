@@ -8,52 +8,6 @@ use log::{debug, error, info};
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
 
-/// Type-safe wrapper for the FTP control port number.
-///
-/// This newtype ensures that control ports are always properly typed,
-/// preventing accidental confusion with data connection ports or other numeric values.
-///
-/// # Security
-/// The control port is a well-known value (typically 21) and can be safely logged.
-struct ControlPort(u16);
-
-impl ControlPort {
-    /// Creates a new control port wrapper from a numeric port value.
-    ///
-    /// # Arguments
-    /// * `port` - The FTP control port number (typically 21)
-    ///
-    /// # Examples
-    /// ```
-    /// use aeroftp::ftp::ControlPort;
-    ///
-    /// let port = ControlPort::new(21);
-    /// assert_eq!(port.get(), 21);
-    /// ```
-    pub fn new(port: u16) -> Self {
-        ControlPort(port)
-    }
-
-    /// Returns the underlying control port number as a `u16`.
-    ///
-    /// # Examples
-    /// ```
-    /// use aeroftp::ftp::ControlPort;
-    ///
-    /// let port = ControlPort::new(21);
-    /// assert_eq!(port.get(), 21);
-    /// ```
-    pub fn get(&self) -> u16 {
-        self.0
-    }
-}
-
-impl std::fmt::Display for ControlPort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 /// Type-safe wrapper for the passive port range used in FTP data connections.
 ///
 /// This newtype ensures that port ranges are validated at construction time,
@@ -252,7 +206,7 @@ pub async fn start_ftp(
             ))
         })
         .idle_session_timeout(DEFAULT_IDLE_SESSION_TIMEOUT_SECS)
-        // .proxy_protocol_mode(ControlPort::new(CONTROL_PORT).get())
+        // .proxy_protocol_mode(CONTROL_PORT)
         .active_passive_mode(ActivePassiveMode::ActiveAndPassive)
         .passive_host(PassiveHost::FromConnection)
         .passive_ports(passive_port_range.get().0..=passive_port_range.get().1)
@@ -260,8 +214,7 @@ pub async fn start_ftp(
         .build()?;
 
     tokio::spawn(async move {
-        let control_port = ControlPort::new(CONTROL_PORT);
-        let addr = format!("{}:{}", FTP_ADDRESS, control_port.get());
+        let addr = format!("{}:{}", FTP_ADDRESS, CONTROL_PORT);
         info!("starting ftp server on {}", &addr);
         if let Err(e) = server.listen(addr.clone()).await {
             error!("FTP server failed to listen on {}: {}", &addr, e);
