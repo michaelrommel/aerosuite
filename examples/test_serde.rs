@@ -1,3 +1,8 @@
+//! Simple test for parsing AWS credentials from JSON.
+//!
+//! Demonstrates deserializing AWS metadata service response format
+//! using serde with PascalCase field naming.
+
 use anyhow::Error;
 use serde::Deserialize;
 

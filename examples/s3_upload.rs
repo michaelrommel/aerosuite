@@ -1,3 +1,8 @@
+//! Simple test application for writing files to S3 storage.
+//!
+//! Demonstrates basic OpenDAL usage with AWS S3 credentials
+//! loaded from environment variables or configuration.
+
 use anyhow::Result;
 use opendal::options;
 // use opendal::services::Azdls;
@@ -31,9 +36,9 @@ async fn main() -> Result<()> {
         .region("${REGION}")
         .bucket("dev-s3-aeroftp")
         .root("/");
-    // .access_key_id("ASIXXXXXXXXXXXXXX25D"){{{
-    // .secret_access_key("a/KI7rxxxxxxxxxxxxxy9upV5Xw")
-    // .session_token("IQoJbxxxxxxxxxxxxxxxxxxxxxxxxxxxpB1bQo3M55/bD");}}}
+    // .access_key_id("ASXXXXXXXXXXXX7BX25D"){{{
+    // .secret_access_key("a/KI7XXXXXXXXXXXXXXXXXXXXXXXXXXXX9upV5Xw")
+    // .session_token("IQoJb3JpZ2luX21111111111111hkIekIwmty26Ju8mcJrFgbpB1bQo3M55/bD");}}}
 
     // Initialize the Operator
     let op: Operator = Operator::new(builder)?.finish();

@@ -1,3 +1,8 @@
+//! Test application demonstrating AWS credential loading from ECS metadata service.
+//!
+//! This example shows how to use OpenDAL with custom credential loading
+//! via the `reqsign::AwsCredentialLoad` trait, simulating ECS task credentials.
+
 use aws_config::BehaviorVersion;
 use chrono::{TimeZone, Utc};
 use opendal::options;

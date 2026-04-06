@@ -415,8 +415,8 @@ impl AwsCreds {
 /// # Thread Safety
 /// This type is fully thread-safe and can be shared across multiple async tasks.
 pub struct CachingAwsCredentialLoader {
-    /// Shared mutable credentials accessible across async tasks.
-    pub credentials: Arc<RwLock<AwsCreds>>,
+    /// Shared mutable credentials accessible across async tasks within the crate.
+    pub(crate) credentials: Arc<RwLock<AwsCreds>>,
 }
 
 impl Default for CachingAwsCredentialLoader {
