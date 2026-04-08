@@ -1,40 +1,47 @@
+//! Configuration types and environment variable parsing for aerostress.
+//!
+//! The [`Config`] struct holds all runtime parameters. Use [`parse_config`] to
+//! populate it from environment variables, or [`ConfigBuilder`] to construct
+//! one programmatically (e.g. in tests).
+
 use anyhow::{Context, Result};
 use std::env;
 
 /// FTP load test configuration parsed from environment variables.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Config {
+pub(crate) struct Config {
     /// FTP server address (e.g., "127.0.0.1")
-    pub target: String,
+    pub(crate) target: String,
 
     /// Number of batches to send
-    pub batches: i32,
+    pub(crate) batches: i32,
 
     /// Parallel tasks per batch
-    pub tasks: i32,
+    pub(crate) tasks: i32,
 
     /// Delay in seconds between batches
-    pub delay: u64,
+    pub(crate) delay: u64,
 
     /// Whether rate limiting is enabled
-    pub limiter: bool,
+    pub(crate) limiter: bool,
 
     /// Test file size in megabytes
-    pub file_size_mb: u32,
+    pub(crate) file_size_mb: u32,
 
     /// Chunk size for streaming in kilobytes
-    pub chunk_kb: u32,
+    pub(crate) chunk_kb: u32,
 
     /// Rate limit interval in milliseconds (0 = no throttling)
-    pub interval: u64,
+    pub(crate) interval: u64,
 
     /// TCP Maximum Segment Size (MSS)
-    pub mss: u32,
+    pub(crate) mss: u32,
 }
 
 /// Builder for constructing Config with validation.
+#[must_use = "Config must be built before use"]
 #[derive(Debug)]
-pub struct ConfigBuilder {
+pub(crate) struct ConfigBuilder {
     target: Option<String>,
     batches: Option<i32>,
     tasks: Option<i32>,
@@ -48,67 +55,69 @@ pub struct ConfigBuilder {
 
 impl ConfigBuilder {
     /// Creates a new ConfigBuilder with default values.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Sets the FTP server target address (e.g., "127.0.0.1").
     ///
-    /// # Example
-    /// ```
+    /// # Examples
+    /// ```no_run
+    /// # use aerostress::config::ConfigBuilder;
     /// let config = ConfigBuilder::new()
     ///     .target("ftp.example.com")
-    ///     .build();
+    ///     .build()
+    ///     .expect("valid configuration");
     /// ```
-    pub fn target(mut self, value: impl Into<String>) -> Self {
+    pub(crate) fn target(mut self, value: impl Into<String>) -> Self {
         self.target = Some(value.into());
         self
     }
 
     /// Sets the number of batches to send.
-    pub fn batches(mut self, value: i32) -> Self {
+    pub(crate) fn batches(mut self, value: i32) -> Self {
         self.batches = Some(value);
         self
     }
 
     /// Sets the number of parallel tasks per batch.
-    pub fn tasks(mut self, value: i32) -> Self {
+    pub(crate) fn tasks(mut self, value: i32) -> Self {
         self.tasks = Some(value);
         self
     }
 
     /// Sets the delay in seconds between batches.
-    pub fn delay(mut self, value: u64) -> Self {
+    pub(crate) fn delay(mut self, value: u64) -> Self {
         self.delay = Some(value);
         self
     }
 
     /// Enables or disables rate limiting.
-    pub fn limiter(mut self, value: bool) -> Self {
+    pub(crate) fn limiter(mut self, value: bool) -> Self {
         self.limiter = Some(value);
         self
     }
 
     /// Sets the file size in megabytes for test files.
-    pub fn file_size_mb(mut self, value: u32) -> Self {
+    pub(crate) fn file_size_mb(mut self, value: u32) -> Self {
         self.file_size_mb = Some(value);
         self
     }
 
     /// Sets the chunk size for streaming in kilobytes.
-    pub fn chunk_kb(mut self, value: u32) -> Self {
+    pub(crate) fn chunk_kb(mut self, value: u32) -> Self {
         self.chunk_kb = Some(value);
         self
     }
 
     /// Sets the rate limit interval in milliseconds (0 = no throttling).
-    pub fn interval(mut self, value: u64) -> Self {
+    pub(crate) fn interval(mut self, value: u64) -> Self {
         self.interval = Some(value);
         self
     }
 
     /// Sets the TCP Maximum Segment Size (MSS).
-    pub fn mss(mut self, value: u32) -> Self {
+    pub(crate) fn mss(mut self, value: u32) -> Self {
         self.mss = Some(value);
         self
     }
@@ -117,7 +126,7 @@ impl ConfigBuilder {
     ///
     /// # Errors
     /// Returns an error if any required field is missing from the builder.
-    pub fn build(self) -> Result<Config> {
+    pub(crate) fn build(self) -> Result<Config> {
         Ok(Config {
             target: self.target.context("target is required")?,
             batches: self.batches.context("batches is required")?,
@@ -188,7 +197,7 @@ impl Default for ConfigBuilder {
 ///
 /// # Errors
 /// Returns an error if any required environment variable cannot be parsed as its expected type.
-pub fn parse_config() -> Result<Config> {
+pub(crate) fn parse_config() -> Result<Config> {
     ConfigBuilder::new()
         .target(env::var("AEROSTRESS_TARGET").unwrap_or_else(|_| "127.0.0.1".to_string()))
         .batches(
