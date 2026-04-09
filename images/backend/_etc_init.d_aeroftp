@@ -9,6 +9,9 @@ pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/aeroftp.log"
 error_log="/var/log/aeroftp.log"
 
+# Load variables from /etc/conf.d/aeroftp
+extra_started_commands="reload"
+
 depend() {
     need net
     after firewall
