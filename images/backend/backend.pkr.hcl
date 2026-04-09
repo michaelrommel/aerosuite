@@ -63,8 +63,9 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh",
+      "sudo apk add --no-cache ca-certificates openssh nftables",
       "sudo rc-update add sshd default",
+      "sudo rc-update add nftables default",
     ]
   }
 
@@ -104,17 +105,70 @@ build {
     ]
   }
 
-  # Install a systemd/openrc service file
+  # Stage the credentials file via /tmp (writable by alpine), then move it into place
   provisioner "file" {
-    source      = "./aeroftp.openrc"
-    destination = "/tmp/aeroftp.openrc"
+    source      = "./_home_aeroftp_credentials.json"
+    destination = "/tmp/_home_aeroftp_credentials.json"
+  }
+
+  # Install and configure the app
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_home_aeroftp_credentials.json /home/aeroftp/credentials.json",
+      "sudo chown aeroftp:aeroftp /home/aeroftp/credentials.json",
+    ]
+  }
+
+  # Write default service environment configuration
+  provisioner "file" {
+    source      = "./_etc_conf.d_aeroftp"
+    destination = "/tmp/_etc_conf.d_aeroftp"
   }
 
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/aeroftp.openrc /etc/init.d/aeroftp",
+      "sudo mkdir -p /etc/conf.d",
+      "sudo mv /tmp/_etc_conf.d_aeroftp /etc/conf.d/aeroftp",
+    ]
+  }
+
+  # Install a systemd/openrc service file
+  provisioner "file" {
+    source      = "./_etc_init.d_aeroftp"
+    destination = "/tmp/_etc_init.d_aeroftp"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_init.d_aeroftp /etc/init.d/aeroftp",
       "sudo chmod +x /etc/init.d/aeroftp",
       "sudo rc-update add aeroftp default",
+    ]
+  }
+
+  # Install nftables ruleset
+  provisioner "file" {
+    source      = "./_etc_nftables_aeroftp.nft"
+    destination = "/tmp/_etc_nftables_aeroftp.nft"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_nftables_aeroftp.nft /etc/nftables.nft",
+    ]
+  }
+
+  # Install the aeroftp-routing OpenRC service
+  provisioner "file" {
+    source      = "./_etc_init.d_aeroftp-routing"
+    destination = "/tmp/_etc_init.d_aeroftp-routing"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_init.d_aeroftp-routing /etc/init.d/aeroftp-routing",
+      "sudo chmod +x /etc/init.d/aeroftp-routing",
+      "sudo rc-update add aeroftp-routing default",
     ]
   }
 }
