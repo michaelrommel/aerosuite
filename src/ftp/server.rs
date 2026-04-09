@@ -76,8 +76,6 @@ impl std::fmt::Display for PassivePortRange {
 // const FTP_ADDRESS: &str = "[::]";
 const FTP_ADDRESS: &str = "0.0.0.0";
 const CONTROL_PORT: u16 = 21;
-const PASSIVE_PORT_RANGE_START: u16 = 30000;
-const PASSIVE_PORT_RANGE_END: u16 = 49999;
 
 /// Default FTP session idle timeout in seconds (10 minutes).
 ///
@@ -106,6 +104,12 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 /// The server requires the following environment variables:
 /// * `AWS_S3_REGION` - AWS region (e.g., "eu-west-2")
 /// * `AWS_S3_BUCKET` - S3 bucket name (e.g., "my-ftp-bucket")
+///
+/// * `FTP_PASSIVE_PORT_START` - Start of the passive port range (e.g., 30000)
+/// * `FTP_PASSIVE_PORT_END` - End of the passive port range (e.g., 49999)
+///
+/// The following environment variable is optional and falls back to a default:
+/// * `AWS_S3_ENDPOINT` - S3 endpoint URL (default: `https://s3.amazonaws.com`; useful for LocalStack or MinIO)
 ///
 /// # Arguments
 /// * `shutdown` - A broadcast receiver that signals when the server should shut down gracefully
@@ -139,10 +143,12 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
 
     let region = std::env::var("AWS_S3_REGION")?;
     let bucket = std::env::var("AWS_S3_BUCKET")?;
+    let s3_endpoint = std::env::var("AWS_S3_ENDPOINT")
+        .unwrap_or_else(|_| "https://s3.amazonaws.com".to_string());
 
     let builder = S3::default()
         .customized_credential_load(Box::new(caching_provider))
-        .endpoint("https://s3.amazonaws.com")
+        .endpoint(&s3_endpoint)
         .region(&region)
         .bucket(&bucket)
         .root("/");
@@ -156,9 +162,14 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
     let authenticator = JsonFileAuthenticator::from_file("credentials.json")
         .map_err(|e| anyhow::anyhow!("could not load credentials file: {}", e))?;
 
-    let passive_port_range =
-        PassivePortRange::new(PASSIVE_PORT_RANGE_START, PASSIVE_PORT_RANGE_END)
-            .context("Invalid passive port range configuration")?;
+    let passive_port_start = std::env::var("FTP_PASSIVE_PORT_START")?
+        .parse::<u16>()
+        .context("FTP_PASSIVE_PORT_START must be a valid port number")?;
+    let passive_port_end = std::env::var("FTP_PASSIVE_PORT_END")?
+        .parse::<u16>()
+        .context("FTP_PASSIVE_PORT_END must be a valid port number")?;
+    let passive_port_range = PassivePortRange::new(passive_port_start, passive_port_end)
+        .context("Invalid passive port range configuration")?;
 
     let server = libunftp::ServerBuilder::new(Box::new(move || backend.clone()))
         .authenticator(std::sync::Arc::new(authenticator))
