@@ -1818,7 +1818,7 @@ dependencies = [
  "dashmap",
  "derive_more",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "lazy_static",
  "moka",
  "nix",

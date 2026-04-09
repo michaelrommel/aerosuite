@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+name="aeroftp"
+description="AeroFTP server"
+command="/home/aeroftp/aeroftp"
+command_user="aeroftp"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/aeroftp.log"
+error_log="/var/log/aeroftp.log"
+
+depend() {
+    need net
+    after firewall
+}
