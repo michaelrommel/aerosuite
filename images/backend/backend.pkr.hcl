@@ -1,5 +1,14 @@
+#
+# Packer file for creating the backend AMI image
+#
+# Run this with packer build backend.pkr.hcl from this directory.
+# You need to have 'cargo build --release --bin aeroftp' the 
+# aeroftp application in the git root directory.
+#
+
 source "amazon-ebs" "alpine" {
   ami_name      = "aeroftp-alpine-{{timestamp}}"
+  # we need t3 because the images use uefi
   instance_type = "t3.micro"
   region        = "eu-west-2"
   vpc_id        = "vpc-0595e17ce290fb050"
@@ -80,6 +89,31 @@ build {
     ]
   }
 
+  # Install nftables ruleset
+  provisioner "file" {
+    source      = "./_etc_nftables_aeroftp.nft"
+    destination = "/tmp/_etc_nftables_aeroftp.nft"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_nftables_aeroftp.nft /etc/nftables.nft",
+    ]
+  }
+
+  # Install the aeroftp-routing OpenRC service
+  provisioner "file" {
+    source      = "./_etc_init.d_aeroftp-routing"
+    destination = "/tmp/_etc_init.d_aeroftp-routing"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_init.d_aeroftp-routing /etc/init.d/aeroftp-routing",
+      "sudo chmod +x /etc/init.d/aeroftp-routing",
+      "sudo rc-update add aeroftp-routing default",
+    ]
+  }
   # Create a dedicated aeroftp system user with a home directory
   provisioner "shell" {
     inline = [
@@ -92,7 +126,7 @@ build {
 
   # Stage the binary via /tmp (writable by alpine), then move it into place
   provisioner "file" {
-    source      = "./target/release/aeroftp"
+    source      = "../../target/release/aeroftp"
     destination = "/tmp/aeroftp"
   }
 
@@ -143,32 +177,6 @@ build {
       "sudo mv /tmp/_etc_init.d_aeroftp /etc/init.d/aeroftp",
       "sudo chmod +x /etc/init.d/aeroftp",
       "sudo rc-update add aeroftp default",
-    ]
-  }
-
-  # Install nftables ruleset
-  provisioner "file" {
-    source      = "./_etc_nftables_aeroftp.nft"
-    destination = "/tmp/_etc_nftables_aeroftp.nft"
-  }
-
-  provisioner "shell" {
-    inline = [
-      "sudo mv /tmp/_etc_nftables_aeroftp.nft /etc/nftables.nft",
-    ]
-  }
-
-  # Install the aeroftp-routing OpenRC service
-  provisioner "file" {
-    source      = "./_etc_init.d_aeroftp-routing"
-    destination = "/tmp/_etc_init.d_aeroftp-routing"
-  }
-
-  provisioner "shell" {
-    inline = [
-      "sudo mv /tmp/_etc_init.d_aeroftp-routing /etc/init.d/aeroftp-routing",
-      "sudo chmod +x /etc/init.d/aeroftp-routing",
-      "sudo rc-update add aeroftp-routing default",
     ]
   }
 }
