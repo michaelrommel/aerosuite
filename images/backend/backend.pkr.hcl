@@ -2,8 +2,9 @@
 # Packer file for creating the backend AMI image
 #
 # Run this with packer build backend.pkr.hcl from this directory.
-# You need to have 'cargo build --release --bin aeroftp' the 
-# aeroftp application in the git root directory.
+# You need to have build the aeroftp application in the development docker
+# container with:
+# cargo build --release --bin aeroftp --target x86_64-unknown-linux-musl
 #
 
 source "amazon-ebs" "alpine" {
@@ -72,9 +73,32 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+    ]
+  }
+
+  # Install the CloudWatch agent
+  provisioner "shell" {
+    inline = [
+      "curl -sSfO https://s3.amazonaws.com/amazoncloudwatch-agent/alpine/amd64/latest/amazon-cloudwatch-agent.apk",
+      "sudo apk add --allow-untrusted amazon-cloudwatch-agent.apk",
+      "rm amazon-cloudwatch-agent.apk",
+    ]
+  }
+
+  # Install the CloudWatch agent configuration
+  provisioner "file" {
+    source      = "./_opt_aws_amazon-cloudwatch-agent_etc_amazon-cloudwatch-agent.json"
+    destination = "/tmp/amazon-cloudwatch-agent.json"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mkdir -p /opt/aws/amazon-cloudwatch-agent/etc",
+      "sudo mv /tmp/amazon-cloudwatch-agent.json /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json",
+      "sudo rc-update add amazon-cloudwatch-agent default",
     ]
   }
 

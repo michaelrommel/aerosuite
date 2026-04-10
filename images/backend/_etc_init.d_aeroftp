@@ -2,12 +2,15 @@
 
 name="aeroftp"
 description="AeroFTP server"
+supervisor="supervise-daemon"
+
 command="/home/aeroftp/aeroftp"
 command_user="aeroftp"
-command_background=true
 pidfile="/run/${RC_SVCNAME}.pid"
-output_log="/var/log/aeroftp.log"
-error_log="/var/log/aeroftp.log"
+
+# Logs are written here; CloudWatch agent tails this file
+output_log="/var/log/aeroftp/aeroftp.log"
+error_log="/var/log/aeroftp/aeroftp.log"
 
 # Load variables from /etc/conf.d/aeroftp
 extra_started_commands="reload"
@@ -15,4 +18,9 @@ extra_started_commands="reload"
 depend() {
     need net
     after firewall
+}
+
+start_pre() {
+    # Ensure log directory exists with correct ownership before supervise-daemon starts
+    checkpath --directory --owner aeroftp:aeroftp --mode 0755 /var/log/aeroftp
 }
