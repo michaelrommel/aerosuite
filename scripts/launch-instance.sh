@@ -2,9 +2,10 @@
 set -e
 
 INSTANCE_ID=$(aws ec2 run-instances \
-	--image-id ami-04c78c386aeb259b1 \
+	--image-id ami-06982f55224090184 \
 	--instance-type t3.micro \
-	--key-name key-00e775d21bd408682 \
+	--region eu-west-2 \
+	--key-name ec2-user \
 	--subnet-id subnet-0c48fb2dcd6ce6c10 \
 	--security-group-ids sg-06d737ea5595c275d \
 	--associate-public-ip-address \
