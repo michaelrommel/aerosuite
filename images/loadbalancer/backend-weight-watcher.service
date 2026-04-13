@@ -1,0 +1,27 @@
+[Unit]
+Description=Keepalived Backend Weight Watcher Daemon
+Documentation=man:keepalived(8)
+After=network.target keepalived.service
+Wants=keepalived.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/manage-backend.sh watch
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backend-weight-watcher
+
+# Run as root to manage keepalived config and reload service
+User=root
+Group=root
+
+# Security hardening (adjust as needed)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/run /etc/keepalived /var/log
+
+[Install]
+WantedBy=multi-user.target

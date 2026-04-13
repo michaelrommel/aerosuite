@@ -1,8 +1,15 @@
-#!/bin/sh
+#!/bin/bash
 set -e
 
+AMI=$1
+
+if [[ -z "$AMI" ]]; then
+	echo "Usage: $0 <AMI Image>"
+	exit 1
+fi
+
 INSTANCE_ID=$(aws ec2 run-instances \
-	--image-id ami-06982f55224090184 \
+	--image-id "${AMI}" \
 	--instance-type t3.micro \
 	--region eu-west-2 \
 	--key-name ec2-user \

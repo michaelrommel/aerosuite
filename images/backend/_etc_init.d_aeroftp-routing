@@ -13,13 +13,13 @@ start() {
 
     # Copy the existing default gateway into table 100 so that
     # fwmark-tagged packets (DNS, HTTP/S) reach the old gateway
-    ip route add default via 172.16.32.1 dev enX0 metric 100 table 100
+    ip route add default via 172.16.32.1 dev eth0 metric 100 table 100
 
     # Remove the untagged default route from the main table
-    ip route del default dev enX0
+    ip route del default dev eth0
 
     # Add a new default route for all other traffic (FTP data)
-    ip route add default via 172.16.32.10 dev enX0 metric 10
+    ip route add default via 172.16.32.10 dev eth0 metric 10
 
     # Route packets marked with fwmark 13 (set by nftables) through table 100
     ip rule add fwmark 13 table 100
@@ -31,9 +31,9 @@ stop() {
     ebegin "Removing aeroftp routing rules"
 
     ip rule del fwmark 13 table 100
-    ip route del default via 172.16.32.10 dev enX0 metric 10
-    ip route add default via 172.16.32.1 dev enX0
-    ip route del default via 172.16.32.1 dev enX0 metric 100 table 100
+    ip route del default via 172.16.32.10 dev eth0 metric 10
+    ip route add default via 172.16.32.1 dev eth0
+    ip route del default via 172.16.32.1 dev eth0 metric 100 table 100
 
     eend $?
 }

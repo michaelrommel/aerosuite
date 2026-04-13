@@ -19,7 +19,9 @@ source "amazon-ebs" "alpine" {
   # Find the latest: https://www.alpinelinux.org/cloud/
   source_ami_filter {
     filters = {
-      name                = "alpine-3.*-x86_64-uefi-*"
+      # fix a version exactly, as time sorting is flaky and might
+      # give you an older version, 3.21 instead of 3.23
+      name                = "alpine-3.23.3-x86_64-uefi-tiny-r0"
       root-device-type    = "ebs"
       virtualization-type = "hvm"
     }
@@ -73,18 +75,22 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+      "sudo rm -f /etc/hostname",
+      "sudo rm -rf /var/lib/tiny-cloud/*",
     ]
   }
 
   # Install the CloudWatch agent
+  provisioner "file" {
+    source      = "./_tmp_amazon-cloudwatch-installer.sh"
+    destination = "/tmp/amazon-cloudwatch-installer.sh"
+  }
   provisioner "shell" {
     inline = [
-      "curl -sSfO https://s3.amazonaws.com/amazoncloudwatch-agent/alpine/amd64/latest/amazon-cloudwatch-agent.apk",
-      "sudo apk add --allow-untrusted amazon-cloudwatch-agent.apk",
-      "rm amazon-cloudwatch-agent.apk",
+      "sudo /bin/sh /tmp/amazon-cloudwatch-installer.sh"
     ]
   }
 
@@ -93,11 +99,23 @@ build {
     source      = "./_opt_aws_amazon-cloudwatch-agent_etc_amazon-cloudwatch-agent.json"
     destination = "/tmp/amazon-cloudwatch-agent.json"
   }
+  provisioner "file" {
+    source      = "./_opt_aws_amazon-cloudwatch-agent_etc_amazon-cloudwatch-agent.toml"
+    destination = "/tmp/amazon-cloudwatch-agent.toml"
+  }
+  # Install the cloudwatch-agent OpenRC service
+  provisioner "file" {
+    source      = "./_etc_init.d_amazon-cloudwatch-agent"
+    destination = "/tmp/_etc_init.d_amazon-cloudwatch-agent"
+  }
 
   provisioner "shell" {
     inline = [
       "sudo mkdir -p /opt/aws/amazon-cloudwatch-agent/etc",
       "sudo mv /tmp/amazon-cloudwatch-agent.json /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json",
+      "sudo mv /tmp/amazon-cloudwatch-agent.toml /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.toml",
+      "sudo mv /tmp/_etc_init.d_amazon-cloudwatch-agent /etc/init.d/amazon-cloudwatch-agent",
+      "sudo chmod +x /etc/init.d/amazon-cloudwatch-agent",
       "sudo rc-update add amazon-cloudwatch-agent default",
     ]
   }
@@ -138,6 +156,7 @@ build {
       "sudo rc-update add aeroftp-routing default",
     ]
   }
+
   # Create a dedicated aeroftp system user with a home directory
   provisioner "shell" {
     inline = [
@@ -158,8 +177,9 @@ build {
   provisioner "shell" {
     inline = [
       "sudo mv /tmp/aeroftp /home/aeroftp/aeroftp",
-      "sudo chmod +x /home/aeroftp/aeroftp",
       "sudo chown aeroftp:aeroftp /home/aeroftp/aeroftp",
+      "sudo chmod +x /home/aeroftp/aeroftp",
+      "sudo setcap CAP_NET_BIND_SERVICE=+eip /home/aeroftp/aeroftp",
     ]
   }
 
@@ -174,6 +194,20 @@ build {
     inline = [
       "sudo mv /tmp/_home_aeroftp_credentials.json /home/aeroftp/credentials.json",
       "sudo chown aeroftp:aeroftp /home/aeroftp/credentials.json",
+    ]
+  }
+
+  # Enable log rotation
+  provisioner "file" {
+    source      = "./_etc_logrotate.d_aeroftp"
+    destination = "/tmp/_etc_logrotate.d_aeroftp"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mkdir -p /etc/logrotate.d",
+      "sudo mv /tmp/_etc_logrotate.d_aeroftp /etc/logrotate.d/aeroftp",
+      "sudo chown root:root /etc/logrotate.d/aeroftp",
     ]
   }
 

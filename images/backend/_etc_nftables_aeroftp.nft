@@ -57,6 +57,8 @@ table inet nftables_svc {
 	chain OUTPUT {
 		type route hook output priority mangle
 		policy accept
+		# HACK: route specific SSH packets back to my server for direct login
+		ip daddr 195.201.133.194 tcp sport 22 meta mark set 13
 		tcp dport 80 meta mark set 13
 		tcp dport 443 meta mark set 13
 		tcp dport 53 meta mark set 13
