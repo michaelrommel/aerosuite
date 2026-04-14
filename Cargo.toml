@@ -11,7 +11,7 @@ suppaftp = { version = "8", features = ["tokio"] }
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "time", "io-util", "signal"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
 tokio-stream = { version = "0.1.18", features = ["time"] }
-rand = "0.10.0"
+rand = "0.10.1"
 socket2 = "0.6"
 futures = "0.3.32"
 governor = "0.10"
