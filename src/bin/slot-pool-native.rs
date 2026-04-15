@@ -5,8 +5,11 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use redis::{aio::MultiplexedConnection, AsyncCommands};
-use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use redis::{aio::MultiplexedConnection, AsyncCommands, SortedSetAddOptions};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 // ── Redis key constants ───────────────────────────────────────────────────────
 
@@ -57,11 +60,11 @@ enum Command {
     /// Initialise the slot pool (idempotent; skips leased or already-free slots)
     Init {
         /// First slot number, inclusive
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 0)]
         min: u32,
 
         /// Last slot number, inclusive
-        #[arg(long, default_value_t = 39)]
+        #[arg(long, default_value_t = 19)]
         max: u32,
     },
 
@@ -71,8 +74,8 @@ enum Command {
         #[arg(long)]
         instance_id: String,
 
-        /// Lease duration in milliseconds  [default: 30 000]
-        #[arg(long, default_value_t = 30_000)]
+        /// Lease duration in milliseconds  [default: 90 000]
+        #[arg(long, default_value_t = 90_000)]
         ttl_ms: u64,
     },
 
@@ -86,8 +89,8 @@ enum Command {
         #[arg(long)]
         instance_id: String,
 
-        /// New TTL in milliseconds  [default: 30 000]
-        #[arg(long, default_value_t = 30_000)]
+        /// New TTL in milliseconds  [default: 90 000]
+        #[arg(long, default_value_t = 90_000)]
         ttl_ms: u64,
     },
 
@@ -101,13 +104,13 @@ enum Command {
         #[arg(long)]
         instance_id: String,
 
-        /// Lease TTL to renew to on each tick, in milliseconds  [default: 30 000]
-        #[arg(long, default_value_t = 30_000)]
+        /// Lease TTL to renew to on each tick, in milliseconds  [default: 90 000]
+        #[arg(long, default_value_t = 90_000)]
         ttl_ms: u64,
 
         /// How often to renew, in seconds.  Should be well below ttl_ms / 1000
         /// to avoid the lease expiring between two heartbeats.  [default: 10]
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 30)]
         interval: u64,
     },
 
@@ -126,13 +129,78 @@ enum Command {
     Status,
 }
 
+// ── Redis client builder ─────────────────────────────────────────────────────
+
+/// Build a Redis client, optionally with TLS.
+///
+/// TLS is activated when any of the following is true:
+///   - `--tls` flag is passed
+///   - `--tls-insecure` flag is passed (also skips certificate verification)
+///   - `--tls-ca-cert` path is provided (uses a custom CA instead of system roots)
+///   - the URL already starts with `rediss://`
+///
+/// Without any of those, a plain `redis://` connection is used.
+fn build_redis_client(
+    redis_url: &str,
+    tls: bool,
+    tls_insecure: bool,
+    tls_ca_cert: &Option<PathBuf>,
+) -> Result<redis::Client> {
+    let use_tls =
+        tls || tls_insecure || tls_ca_cert.is_some() || redis_url.starts_with("rediss://");
+
+    if !use_tls {
+        return redis::Client::open(redis_url).context("Invalid Redis URL");
+    }
+
+    // Ensure the URL uses the rediss:// scheme so redis-rs activates TLS
+    let url = if redis_url.starts_with("redis://") {
+        redis_url.replacen("redis://", "rediss://", 1)
+    } else {
+        redis_url.to_string()
+    };
+
+    // The #insecure URL fragment tells redis-rs to skip certificate verification
+    let url = if tls_insecure && !url.contains("#insecure") {
+        format!("{url}#insecure")
+    } else {
+        url
+    };
+
+    match tls_ca_cert {
+        None => {
+            // Standard TLS: system root CAs, hostname verified (unless #insecure)
+            redis::Client::open(url.as_str()).context("Invalid Redis URL")
+        }
+        Some(ca_path) => {
+            // Custom CA certificate in PEM format
+            let ca_pem = std::fs::read(ca_path)
+                .with_context(|| format!("Cannot read CA cert: {}", ca_path.display()))?;
+
+            redis::Client::build_with_tls(
+                url.as_str(),
+                redis::TlsCertificates {
+                    client_tls: None, // no mTLS — server-side TLS only
+                    root_cert: Some(ca_pem),
+                },
+            )
+            .context("Failed to build Redis TLS client")
+        }
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let client = redis::Client::open(args.redis_url.as_str()).context("Invalid Redis URL")?;
+    let client = build_redis_client(
+        &args.redis_url,
+        args.tls,
+        args.tls_insecure,
+        &args.tls_ca_cert,
+    )?;
 
     let mut con = client
         .get_multiplexed_async_connection()
@@ -168,7 +236,7 @@ async fn cmd_init(con: &mut MultiplexedConnection, min: u32, max: u32) -> Result
         bail!("--min ({min}) must be ≤ --max ({max})");
     }
 
-    let mut added = 0u32;
+    let mut added = 0usize;
     for slot in min..=max {
         let s = slot.to_string();
         // Only add to the free set if not currently leased
@@ -181,12 +249,13 @@ async fn cmd_init(con: &mut MultiplexedConnection, min: u32, max: u32) -> Result
         if !leased {
             // NX: skip if already free (preserves existing "free since" score)
             // Score 0: treated as "free since forever", claimed before any recently-released slot
-            added += redis::cmd("ZADD")
-                .arg(KEY_AVAILABLE)
-                .arg("NX")
-                .arg(0u64)
-                .arg(&s)
-                .query_async::<u32>(con)
+            added += con
+                .zadd_options::<_, _, _, usize>(
+                    KEY_AVAILABLE,
+                    &s,
+                    0u64,
+                    &SortedSetAddOptions::add_only(),
+                )
                 .await
                 .context("ZADD failed")?;
         }
@@ -203,18 +272,15 @@ async fn cmd_claim(con: &mut MultiplexedConnection, instance_id: &str, ttl_ms: u
     // Concurrent sweeps are harmless: ZREM is idempotent, ZADD on an existing
     // member just updates the score (same value), ZPOPMIN below is atomic.
     let now = now_ms();
-    let expired: Vec<String> = redis::cmd("ZRANGEBYSCORE")
-        .arg(KEY_LEASES)
-        .arg("-inf")
-        .arg(now)
-        .query_async(con)
+    let expired: Vec<String> = con
+        .zrangebyscore(KEY_LEASES, "-inf", now)
         .await
         .context("ZRANGEBYSCORE failed")?;
 
     for slot in &expired {
         let _: () = con.zrem(KEY_LEASES, slot).await.context("ZREM failed")?;
         let _: () = con
-            .zadd(KEY_AVAILABLE, now, slot)
+            .zadd(KEY_AVAILABLE, slot, now)
             .await
             .context("ZADD failed")?;
         let _: () = con.del(key_owner(slot)).await.context("DEL failed")?;
@@ -222,10 +288,8 @@ async fn cmd_claim(con: &mut MultiplexedConnection, instance_id: &str, ttl_ms: u
 
     // Pop the slot free the longest (lowest score = oldest free time).
     // Maximises the cooling-off window before an IP/slot is re-assigned.
-    let result: Vec<(String, f64)> = redis::cmd("ZPOPMIN")
-        .arg(KEY_AVAILABLE)
-        .arg(1u32)
-        .query_async(con)
+    let result: Vec<(String, f64)> = con
+        .zpopmin(KEY_AVAILABLE, 1isize)
         .await
         .context("ZPOPMIN failed")?;
 
@@ -240,7 +304,7 @@ async fn cmd_claim(con: &mut MultiplexedConnection, instance_id: &str, ttl_ms: u
             // 3. Register the lease.
             let expiry = now + ttl_ms;
             let _: () = con
-                .zadd(KEY_LEASES, expiry, &s)
+                .zadd(KEY_LEASES, &s, expiry)
                 .await
                 .context("ZADD failed")?;
             let _: () = con
@@ -280,7 +344,7 @@ async fn cmd_renew(
         Some(o) if o == instance_id => {
             let expiry = now_ms() + ttl_ms;
             let _: () = con
-                .zadd(KEY_LEASES, expiry, &slot_str)
+                .zadd(KEY_LEASES, &slot_str, expiry)
                 .await
                 .context("ZADD failed")?;
             println!(
@@ -315,8 +379,8 @@ async fn cmd_heartbeat(
     use std::time::Duration;
     use tokio::signal::unix::{signal, SignalKind};
 
-    let mut sigterm = signal(SignalKind::terminate())
-        .context("Failed to register SIGTERM handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("Failed to register SIGTERM handler")?;
 
     println!(
         "💓 Heartbeat started — slot {slot}, owner '{instance_id}', \
@@ -374,7 +438,7 @@ async fn cmd_release(con: &mut MultiplexedConnection, slot: u32, instance_id: &s
         .await
         .context("ZREM failed")?;
     let _: () = con
-        .zadd(KEY_AVAILABLE, now, &slot_str)
+        .zadd(KEY_AVAILABLE, &slot_str, now)
         .await
         .context("ZADD failed")?;
 
@@ -385,21 +449,13 @@ async fn cmd_release(con: &mut MultiplexedConnection, slot: u32, instance_id: &s
 async fn cmd_status(con: &mut MultiplexedConnection) -> Result<()> {
     let free_count: u64 = con.zcard(KEY_AVAILABLE).await.context("ZCARD failed")?;
     // ZRANGE returns slots ordered by score (ascending = oldest free first)
-    let free_slots_raw: Vec<(String, f64)> = redis::cmd("ZRANGE")
-        .arg(KEY_AVAILABLE)
-        .arg(0i64)
-        .arg(-1i64)
-        .arg("WITHSCORES")
-        .query_async(con)
+    let free_slots_raw: Vec<(String, f64)> = con
+        .zrange_withscores(KEY_AVAILABLE, 0isize, -1isize)
         .await
         .context("ZRANGE available WITHSCORES failed")?;
 
-    let leases: Vec<(String, f64)> = redis::cmd("ZRANGE")
-        .arg(KEY_LEASES)
-        .arg(0i64)
-        .arg(-1i64)
-        .arg("WITHSCORES")
-        .query_async(con)
+    let leases: Vec<(String, f64)> = con
+        .zrange_withscores(KEY_LEASES, 0isize, -1isize)
         .await
         .context("ZRANGE WITHSCORES failed")?;
 

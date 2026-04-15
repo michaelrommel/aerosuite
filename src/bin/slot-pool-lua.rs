@@ -216,13 +216,79 @@ enum Command {
     Status,
 }
 
+
+// ── Redis client builder ──────────────────────────────────────────────────────
+
+/// Build a Redis client, optionally with TLS.
+///
+/// TLS is activated when any of the following is true:
+///   - `--tls` flag is passed
+///   - `--tls-insecure` flag is passed (also skips certificate verification)
+///   - `--tls-ca-cert` path is provided (uses a custom CA instead of system roots)
+///   - the URL already starts with `rediss://`
+///
+/// Without any of those, a plain `redis://` connection is used.
+fn build_redis_client(
+    redis_url: &str,
+    tls: bool,
+    tls_insecure: bool,
+    tls_ca_cert: &Option<PathBuf>,
+) -> Result<redis::Client> {
+    let use_tls = tls || tls_insecure || tls_ca_cert.is_some()
+                  || redis_url.starts_with("rediss://");
+
+    if !use_tls {
+        return redis::Client::open(redis_url).context("Invalid Redis URL");
+    }
+
+    // Ensure the URL uses the rediss:// scheme so redis-rs activates TLS
+    let url = if redis_url.starts_with("redis://") {
+        redis_url.replacen("redis://", "rediss://", 1)
+    } else {
+        redis_url.to_string()
+    };
+
+    // The #insecure URL fragment tells redis-rs to skip certificate verification
+    let url = if tls_insecure && !url.contains("#insecure") {
+        format!("{url}#insecure")
+    } else {
+        url
+    };
+
+    match tls_ca_cert {
+        None => {
+            // Standard TLS: system root CAs, hostname verified (unless #insecure)
+            redis::Client::open(url.as_str()).context("Invalid Redis URL")
+        }
+        Some(ca_path) => {
+            // Custom CA certificate in PEM format
+            let ca_pem = std::fs::read(ca_path)
+                .with_context(|| format!("Cannot read CA cert: {}", ca_path.display()))?;
+
+            redis::Client::build_with_tls(
+                url.as_str(),
+                redis::TlsCertificates {
+                    client_tls: None, // no mTLS — server-side TLS only
+                    root_cert: Some(ca_pem),
+                },
+            )
+            .context("Failed to build Redis TLS client")
+        }
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let client = redis::Client::open(args.redis_url.as_str()).context("Invalid Redis URL")?;
+    let client = build_redis_client(
+        &args.redis_url,
+        args.tls,
+        args.tls_insecure,
+        &args.tls_ca_cert,
+    )?;
 
     let mut con = client
         .get_multiplexed_async_connection()
