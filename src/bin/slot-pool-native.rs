@@ -6,7 +6,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
 // ── Redis key constants ───────────────────────────────────────────────────────
 
@@ -31,9 +31,22 @@ fn now_ms() -> u64 {
 #[command(about = "Manage a Redis-backed pool of numbered slots (native commands, no Lua)")]
 #[command(long_about = None)]
 struct Args {
-    /// Redis connection URL (env: REDIS_URL)
+    /// Redis connection URL (env: REDIS_URL).
+    /// Use rediss:// for TLS, or combine redis:// with --tls.
     #[arg(long, env = "REDIS_URL", default_value = "redis://127.0.0.1:6379")]
     redis_url: String,
+
+    /// Enable TLS. Automatically switches redis:// to rediss://.
+    #[arg(long)]
+    tls: bool,
+
+    /// Skip certificate verification — for self-signed certs (implies --tls).
+    #[arg(long)]
+    tls_insecure: bool,
+
+    /// PEM-encoded CA certificate file for verifying the Redis server.
+    #[arg(long)]
+    tls_ca_cert: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -78,6 +91,26 @@ enum Command {
         ttl_ms: u64,
     },
 
+    /// Continuously renew a held slot on a fixed interval until SIGTERM
+    Heartbeat {
+        /// Slot number to renew
+        #[arg(long)]
+        slot: u32,
+
+        /// Instance ID that currently owns the slot
+        #[arg(long)]
+        instance_id: String,
+
+        /// Lease TTL to renew to on each tick, in milliseconds  [default: 30 000]
+        #[arg(long, default_value_t = 30_000)]
+        ttl_ms: u64,
+
+        /// How often to renew, in seconds.  Should be well below ttl_ms / 1000
+        /// to avoid the lease expiring between two heartbeats.  [default: 10]
+        #[arg(long, default_value_t = 10)]
+        interval: u64,
+    },
+
     /// Return a slot to the free pool (graceful shutdown)
     Release {
         /// Slot number to release
@@ -117,6 +150,12 @@ async fn main() -> Result<()> {
             instance_id,
             ttl_ms,
         } => cmd_renew(&mut con, slot, &instance_id, ttl_ms).await,
+        Command::Heartbeat {
+            slot,
+            instance_id,
+            ttl_ms,
+            interval,
+        } => cmd_heartbeat(&mut con, slot, &instance_id, ttl_ms, interval).await,
         Command::Release { slot, instance_id } => cmd_release(&mut con, slot, &instance_id).await,
         Command::Status => cmd_status(&mut con).await,
     }
@@ -264,6 +303,43 @@ async fn cmd_renew(
         }
     }
     Ok(())
+}
+
+async fn cmd_heartbeat(
+    con: &mut MultiplexedConnection,
+    slot: u32,
+    instance_id: &str,
+    ttl_ms: u64,
+    interval: u64,
+) -> Result<()> {
+    use std::time::Duration;
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = signal(SignalKind::terminate())
+        .context("Failed to register SIGTERM handler")?;
+
+    println!(
+        "💓 Heartbeat started — slot {slot}, owner '{instance_id}', \
+         TTL {:.0} s, interval {interval} s. Send SIGTERM to stop.",
+        ttl_ms as f64 / 1000.0
+    );
+
+    loop {
+        // Renew at the top of every iteration so the lease is refreshed
+        // immediately on start and after every sleep.
+        cmd_renew(con, slot, instance_id, ttl_ms).await?;
+
+        // Wait for the next tick — but bail out immediately on SIGTERM.
+        tokio::select! {
+            _ = sigterm.recv() => {
+                println!("🛑 SIGTERM received — stopping heartbeat for slot {slot}.");
+                return Ok(());
+            }
+            _ = tokio::time::sleep(Duration::from_secs(interval)) => {
+                // tick — loop back and renew again
+            }
+        }
+    }
 }
 
 async fn cmd_release(con: &mut MultiplexedConnection, slot: u32, instance_id: &str) -> Result<()> {
