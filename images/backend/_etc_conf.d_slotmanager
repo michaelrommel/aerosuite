@@ -1,0 +1,26 @@
+# Configuration for the slotmanager OpenRC service.
+
+# Full path to the slot-pool-native binary
+export SLOT_POOL_BINARY="/usr/local/bin/slot-pool-native"
+
+# Full path to the aws-config binary
+export AWS_CONFIG_BINARY="/usr/local/bin/aws-config"
+
+# Redis connection URL
+# For a local Redis: redis://127.0.0.1:6379
+# For a remote Redis with auth: redis://:password@192.168.1.10:6379
+export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.${REGION}.amazonaws.com:6379
+
+# Lease time-to-live in milliseconds.
+# The slot will expire this long after the last successful heartbeat.
+# Must be longer than INTERVAL * 1000 with a comfortable safety margin.
+TTL_MS="90000"
+
+# How often the heartbeat daemon renews the lease, in seconds.
+# Rule of thumb: TTL_MS / 1000 / 3  (renew at 1/3 of the TTL)
+INTERVAL="30"
+
+# Log file for heartbeat daemon stdout/stderr
+LOGFILE="/var/log/slotmanager.log"
+
+export RUST_LOG=trace
