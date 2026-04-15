@@ -22,7 +22,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
 // ── Redis key constants ───────────────────────────────────────────────────────
 
@@ -141,9 +141,22 @@ return 1
 #[command(about = "Manage a Redis-backed pool of numbered slots with TTL-based leases")]
 #[command(long_about = None)]
 struct Args {
-    /// Redis connection URL (env: REDIS_URL)
+    /// Redis connection URL (env: REDIS_URL).
+    /// Use rediss:// for TLS, or combine redis:// with --tls.
     #[arg(long, env = "REDIS_URL", default_value = "redis://127.0.0.1:6379")]
     redis_url: String,
+
+    /// Enable TLS. Automatically switches redis:// to rediss://.
+    #[arg(long)]
+    tls: bool,
+
+    /// Skip certificate verification — for self-signed certs (implies --tls).
+    #[arg(long)]
+    tls_insecure: bool,
+
+    /// PEM-encoded CA certificate file for verifying the Redis server.
+    #[arg(long)]
+    tls_ca_cert: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -209,8 +222,7 @@ enum Command {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let client =
-        redis::Client::open(args.redis_url.as_str()).context("Invalid Redis URL")?;
+    let client = redis::Client::open(args.redis_url.as_str()).context("Invalid Redis URL")?;
 
     let mut con = client
         .get_multiplexed_async_connection()
