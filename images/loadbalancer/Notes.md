@@ -1,78 +1,95 @@
 
- Quick Start Guide
+ Simplified 3-State Backend Manager - Complete! 🎯
 
- ### 1. Install the scripts (run as root)
+ ### Files Created
 
- ```bash
-   cd /home/rommel/software/aerosuite/aeroftp
-   sudo ./install-backend-manager.sh
- ```
-
- This will:
- - Copy manage-backend.sh to /usr/local/bin/
- - Install the systemd service
- - Start the weight watcher daemon automatically
-
- ### 2. Add backend slots to keepalived.conf
-
- Add these 20 real_server blocks (all DOWN by default):
-
- ```conf
-   real_server 172.16.32.20 80 {
-       weight 100
-       file_check "/var/run/backend-172.16.32.20.healthy" {
-           delay 2
-       }
-   }
-   # ... repeat for IPs .21 through .39
- ```
-
- ### 3. Usage Examples
-
- ┌─────────────────────────────────────┬────────────────────────────────────────┐
- │ Command                             │ Effect                                 │
- ├─────────────────────────────────────┼────────────────────────────────────────┤
- │ sudo manage-backend.sh status       │ Show all backends (all DOWN initially) │
- ├─────────────────────────────────────┼────────────────────────────────────────┤
- │ sudo manage-backend.sh enable 25    │ Enable backend at full weight (100)    │
- ├─────────────────────────────────────┼────────────────────────────────────────┤
- │ sudo manage-backend.sh drain 25     │ Reduce to weight 0 (no new requests)   │
- ├─────────────────────────────────────┼────────────────────────────────────────┤
- │ sudo manage-backend.sh disable 25   │ Mark DOWN, remove from pool            │
- ├─────────────────────────────────────┼────────────────────────────────────────┤
- │ sudo manage-backend.sh weight 25 50 │ Set specific weight (50% traffic)      │
- └─────────────────────────────────────┴────────────────────────────────────────┘
+ ┌────────────────────────────┬─────────────────────────────────────────────┐
+ │ File                       │ Purpose                                     │
+ ├────────────────────────────┼─────────────────────────────────────────────┤
+ │ manage-backend.sh          │ Main CLI tool (enable/drain/disable/status) │
+ ├────────────────────────────┼─────────────────────────────────────────────┤
+ │ backend-state-check.sh     │ Keepalived misc_check script                │
+ ├────────────────────────────┼─────────────────────────────────────────────┤
+ │ install-backend-manager.sh │ Installation script                         │
+ ├────────────────────────────┼─────────────────────────────────────────────┤
+ │ keepalived-example.conf    │ Complete keepalived config example          │
+ └────────────────────────────┴─────────────────────────────────────────────┘
 
  ────────────────────────────────────────────────────────────────────────────────
 
- Complete Lifecycle Example
+ ### Three Clear States
+
+ ┌──────────┬──────────────────────┬────────────────────────────────────┐
+ │ State    │ Marker Files         │ Behavior                           │
+ ├──────────┼──────────────────────┼────────────────────────────────────┤
+ │ ENABLED  │ .healthy only        │ Receives full traffic (weight 100) │
+ ├──────────┼──────────────────────┼────────────────────────────────────┤
+ │ DRAINING │ .healthy + .draining │ No new requests, existing continue │
+ ├──────────┼──────────────────────┼────────────────────────────────────┤
+ │ DISABLED │ No files             │ Removed from pool completely       │
+ └──────────┴──────────────────────┴────────────────────────────────────┘
+
+ ────────────────────────────────────────────────────────────────────────────────
+
+ ### Quick Start
 
  ```bash
-   # Enable a backend when it's ready
+   # Install
+   cd /home/rommel/software/aerosuite/aeroftp
+   sudo ./install-backend-manager.sh
+
+   # Configure keepalived (use keepalived-example.conf as template)
+   cp keepalived-example.conf /etc/keepalived/keepalived.conf
+   sudo systemctl restart keepalived
+
+   # All backends start DISABLED - verify:
+   manage-backend.sh status
+ ```
+
+ ────────────────────────────────────────────────────────────────────────────────
+
+ ### Usage Examples
+
+ ```bash
+   # Enable a backend when ready (receives full traffic)
    sudo manage-backend.sh enable 25
 
-   # Gradually drain before maintenance
-   sudo manage-backend.sh weight 25 50    # Reduce to 50%
-   sleep 180                              # Wait for connections
-   sudo manage-backend.sh weight 25 0     # Zero new requests
-   sleep 60                               # Wait for drain complete
+   # Drain before maintenance (no new requests)
+   sudo manage-backend.sh drain 25
 
-   # Mark DOWN when terminating
+   # Wait for connections to finish...
+   sleep 300
+
+   # Mark down when terminating completely
    sudo manage-backend.sh disable 25
  ```
 
  ────────────────────────────────────────────────────────────────────────────────
 
- Verify Installation
+ ### Status Command Output
 
  ```bash
-   # Check if watcher is running
-   systemctl status backend-weight-watcher
+   $ sudo manage-backend.sh status
+   === All Backends Status (IP Range: 172.16.32.20-39) ===
 
-   # View logs
-   journalctl -u backend-weight-watcher -f
+     [DISABLED] 172.16.32.20
+     [ENABLED ] 172.16.32.25
+     [DRAIN  ] 172.16.32.28
+     [DISABLED] 172.16.32.39
 
-   # Test the manager
-   manage-backend.sh help
+   Summary: 1 ENABLED | 1 DRAINING | 18 DISABLED
  ```
+
+ ────────────────────────────────────────────────────────────────────────────────
+
+ ### How It Works
+
+ The backend-state-check.sh script is called by keepalived's misc_check:
+
+ 1. No health file → Exit code 1 = DOWN (removed from pool)
+ 2. Health file only → Exit code 0 = UP with weight 100 (ENABLED)
+ 3. Both .healthy + .draining → Exit code 0 = UP with weight 0 (DRAINING)
+
+ This gives you clean, explicit state transitions without complex weight management!
+
 

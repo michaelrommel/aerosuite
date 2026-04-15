@@ -4,36 +4,71 @@ description="Policy-based routing rules for aeroftp"
 
 depend() {
     need net
-    need nftables
+    after nftables
+	after slotmanager
     before aeroftp
 }
 
+fetch_interface(){
+	if [ ! -d "/sys/class/net/eth1" ]; then
+
+		einfo "Attaching network interface (${SLOT})"
+		manage-eni --slot "$SLOT" --attach  # uses INSTANCE_ID implicitly via IMDS
+
+		# Wait until AWS has attached the network
+		echo "Waiting for eth1 to appear..."
+		while [ ! -d "/sys/class/net/eth1" ]; do
+			sleep 1
+		done
+	fi
+}
+
+
 start() {
-    ebegin "Applying aeroftp routing rules"
+	ebegin "Applying aeroftp routing rules"
 
-    # Copy the existing default gateway into table 100 so that
-    # fwmark-tagged packets (DNS, HTTP/S) reach the old gateway
-    ip route add default via 172.16.32.1 dev eth0 metric 100 table 100
+	SLOT=$(cat /var/run/slotmanager/slot)
+	OCTET=$((SLOT + 20))
+	ETH0_GW=$(ip route show dev eth0 | grep default | awk '{print $3}')
 
-    # Remove the untagged default route from the main table
-    ip route del default dev eth0
+	fetch_interface
 
-    # Add a new default route for all other traffic (FTP data)
-    ip route add default via 172.16.32.10 dev eth0 metric 10
+	ip link set eth1 up
+	ip a add 172.16.32.${OCTET}/26 dev eth1
 
-    # Route packets marked with fwmark 13 (set by nftables) through table 100
-    ip rule add fwmark 13 table 100
+	# Copy the existing default gateway into table 100 so that
+	# fwmark-tagged packets (DNS, HTTP/S) reach the old gateway
+	ip route add default via ${ETH0_GW} dev eth0 metric 100 table 100
 
-    eend $?
+	# Add a new default route for all other traffic (FTP data)
+	ip route add default via 172.16.32.10 dev eth1 metric 10
+
+	# disable the automatic re-add of the dhcp default gw
+	#mv /etc/udhcpc/udhcpc.conf.disabled /etc/udhcpc/udhcpc.conf
+
+	# Remove the untagged default route from the main table
+	ip route del default via ${ETH0_GW} dev eth0
+
+	# Route packets marked with fwmark 13 (set by nftables) through table 100
+	ip rule add fwmark 13 table 100
+
+	eend $?
 }
 
 stop() {
-    ebegin "Removing aeroftp routing rules"
+	ebegin "Removing aeroftp routing rules"
 
-    ip rule del fwmark 13 table 100
-    ip route del default via 172.16.32.10 dev eth0 metric 10
-    ip route add default via 172.16.32.1 dev eth0
-    ip route del default via 172.16.32.1 dev eth0 metric 100 table 100
+	SLOT=$(cat /var/run/slotmanager/slot)
+	OCTET=$((SLOT + 20))
+	ETH0_GW=$(ip route show dev eth0 table 100| grep default | awk '{print $3}')
 
-    eend $?
+	ip rule del fwmark 13 table 100
+	#mv /etc/udhcpc/udhcpc.conf /etc/udhcpc/udhcpc.conf.disabled
+	ip route add default via ${ETH0_GW} dev eth0
+	ip route del default via 172.16.32.10 dev eth1 metric 10
+	ip route del default via ${ETH0_GW} dev eth0 metric 100 table 100
+	ip a del 172.16.32.${OCTET}/26 dev eth1
+	ip link set eth1 down
+
+	eend $?
 }

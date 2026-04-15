@@ -1,0 +1,8 @@
+backend
+- modify sysctl settings
+- remove ssh startup from packer build script, should be already there
+- script for reserving ports
+- sysctl setting for blocking passive port range
+
+loadbalancer
+

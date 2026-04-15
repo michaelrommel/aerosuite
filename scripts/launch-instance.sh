@@ -12,7 +12,7 @@ INSTANCE_ID=$(aws ec2 run-instances \
 	--image-id "${AMI}" \
 	--instance-type t3.micro \
 	--region eu-west-2 \
-	--key-name ec2-user \
+	--key-name rommel@md151vfc \
 	--subnet-id subnet-0c48fb2dcd6ce6c10 \
 	--security-group-ids sg-06d737ea5595c275d \
 	--associate-public-ip-address \

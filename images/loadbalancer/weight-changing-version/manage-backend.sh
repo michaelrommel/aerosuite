@@ -178,11 +178,11 @@ watch_daemon() {
 			log "Applying weight change: $ip -> $weight"
 
 			# Update keepalived config for this specific IP using perl
-			perl -i -pe 's/(real_server 172\.16\.32\.\Q'."$ip\E"' 80 \{[^}]*weight)\s+\d+/$1 '"$weight"'/e' "$KEEPALIVED_CONF" 2>/dev/null || {
+			perl -i -pe 's/(real_server 172\.16\.32\.\Q'."$ip\E"' 21 \{[^}]*weight)\s+\d+/$1 '"$weight"'/e' "$KEEPALIVED_CONF" 2>/dev/null || {
 				log "WARNING: Could not update config via perl, trying sed fallback" >&2
 
 				# Fallback to sed (less reliable for multi-line)
-				sed -i "/real_server ${ip} 80/,/^    }/{s/weight [0-9]*/weight ${weight}/}" "$KEEPALIVED_CONF"
+				sed -i "/real_server ${ip} 21/,/^    }/{s/weight [0-9]*/weight ${weight}/}" "$KEEPALIVED_CONF"
 			}
 
 			rm -f "$f"
@@ -209,7 +209,7 @@ generate_config() {
 	for i in $(seq "$start_ip" "$end_ip"); do
 		cat <<EOF
 
-    real_server 172.16.32.$i 80 {
+    real_server 172.16.32.$i 21 {
         weight 100
         file_check "/var/run/backend-172.16.32.$i.healthy" {
             delay 2

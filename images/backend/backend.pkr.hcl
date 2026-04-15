@@ -75,11 +75,9 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 redis conntrack-tools",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
-      "sudo rm -f /etc/hostname",
-      "sudo rm -rf /var/lib/tiny-cloud/*",
     ]
   }
 
@@ -120,14 +118,67 @@ build {
     ]
   }
 
-  # Inject the authorised public key for the alpine user
+  # Stage the binary via /tmp (writable by alpine), then move it into place
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/aws-config"
+    destination = "/tmp/aws-config"
+  }
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/manage-eni"
+    destination = "/tmp/manage-eni"
+  }
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/slot-pool-native"
+    destination = "/tmp/slot-pool-native"
+  }
+
+  # Install and configure the interface management
   provisioner "shell" {
     inline = [
-      "mkdir -p /home/alpine/.ssh",
-      "chmod 700 /home/alpine/.ssh",
-      "echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKVSs3Pyvg/Y4e6p/5VkZU5LHsEqoT2EuZ/ZleZgTTkk rommel@crow' >> /home/alpine/.ssh/authorized_keys",
-      "chmod 600 /home/alpine/.ssh/authorized_keys",
-      "chown -R alpine:alpine /home/alpine/.ssh",
+      "sudo mkdir -p /usr/local/bin",
+      "sudo mv /tmp/aws-config /usr/local/bin/aws-config",
+      "sudo mv /tmp/manage-eni /usr/local/bin/manage-eni",
+      "sudo mv /tmp/slot-pool-native /usr/local/bin/slot-pool-native",
+      "sudo chown root:root /usr/local/bin/aws-config",
+      "sudo chown root:root /usr/local/bin/manage-eni",
+      "sudo chown root:root /usr/local/bin/slot-pool-native",
+      "sudo chmod +x /usr/local/bin/aws-config",
+      "sudo chmod +x /usr/local/bin/manage-eni",
+      "sudo chmod +x /usr/local/bin/slot-pool-native",
+    ]
+  }
+
+  # Install the slotmanager OpenRC service
+  provisioner "file" {
+    source      = "./_etc_init.d_slotmanager"
+    destination = "/tmp/_etc_init.d_slotmanager"
+  }
+
+  # Install the slotmanager OpenRC service configuratoin file
+  provisioner "file" {
+    source      = "./_etc_conf.d_slotmanager"
+    destination = "/tmp/_etc_conf.d_slotmanager"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_conf.d_slotmanager /etc/conf.d/slotmanager",
+      "sudo mv /tmp/_etc_init.d_slotmanager /etc/init.d/slotmanager",
+      "sudo chmod +x /etc/init.d/slotmanager",
+      "sudo rc-update add slotmanager default",
+    ]
+  }
+
+  # Install sysctl tweaks
+  provisioner "file" {
+    source      = "./_etc_sysctl.d_50-aeroftp.conf"
+    destination = "/tmp/_etc_sysctl.d_50-aeroftp.conf"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_sysctl.d_50-aeroftp.conf /etc/sysctl.d/50-aeroftp.conf",
+      "sudo chown root:root /etc/sysctl.d/50-aeroftp.conf",
     ]
   }
 
@@ -140,6 +191,7 @@ build {
   provisioner "shell" {
     inline = [
       "sudo mv /tmp/_etc_nftables_aeroftp.nft /etc/nftables.nft",
+      "sudo chown root:root /etc/nftables.nft",
     ]
   }
 
@@ -148,9 +200,15 @@ build {
     source      = "./_etc_init.d_aeroftp-routing"
     destination = "/tmp/_etc_init.d_aeroftp-routing"
   }
+  provisioner "file" {
+    source      = "./_etc_udhcpc_udhcpc.conf"
+    destination = "/tmp/_etc_udhcpc_udhcpc.conf"
+  }
 
   provisioner "shell" {
     inline = [
+      "sudo mv /tmp/_etc_udhcpc_udhcpc.conf /etc/udhcpc/udhcpc.conf.disabled",
+      "sudo chown root:root /etc/udhcpc/udhcpc.conf.disabled",
       "sudo mv /tmp/_etc_init.d_aeroftp-routing /etc/init.d/aeroftp-routing",
       "sudo chmod +x /etc/init.d/aeroftp-routing",
       "sudo rc-update add aeroftp-routing default",
@@ -235,6 +293,17 @@ build {
       "sudo mv /tmp/_etc_init.d_aeroftp /etc/init.d/aeroftp",
       "sudo chmod +x /etc/init.d/aeroftp",
       "sudo rc-update add aeroftp default",
+    ]
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo rm -rf /var/lib/cloud",
+      "sudo rm -f /etc/hostname",
+      "sudo tiny-cloud --bootstrap incomplete",
+      "sudo truncate -s 0 /etc/machine-id",
+      "sudo truncate -s 0 /var/log/*.log",
+      "history -c"
     ]
   }
 }
