@@ -30,7 +30,6 @@ start() {
 
 	SLOT=$(cat /var/run/slotmanager/slot)
 	OCTET=$((SLOT + OFFSET))
-	ETH0_GW=$(ip route show dev eth0 | grep default | awk '{print $3}')
 
 	fetch_interface
 
@@ -43,10 +42,10 @@ start() {
 	# Copy the existing default gateway into table 100 so that
 	# fwmark-tagged packets (DNS, HTTP/S) reach the old gateway
 	# no longer needed, already achieved in /etc/network/interfaces
-	#ip route add default via ${ETH0_GW} dev eth0 metric 100 table 100
+	ip route add default via 172.16.32.65 dev eth0 metric 100 table 100
 
 	# Remove the untagged default route from the main table
-	#ip route del default via ${ETH0_GW} dev eth0
+	ip route del default via 172.16.32.65 dev eth0
 
 	# Route packets marked with fwmark 13 (set by nftables) through table 100
 	ip rule add fwmark 13 table 100
@@ -59,13 +58,13 @@ stop() {
 
 	SLOT=$(cat /var/run/slotmanager/slot)
 	OCTET=$((SLOT + OFFSET))
-	ETH0_GW=$(ip route show dev eth0 table 100| grep default | awk '{print $3}')
 
 	ip rule del fwmark 13 table 100
 	#mv /etc/udhcpc/udhcpc.conf /etc/udhcpc/udhcpc.conf.disabled
 	#ip route add default via ${ETH0_GW} dev eth0
+	ip route add default via 172.16.32.65 dev eth0 metric 512
+	ip route del default via 172.16.32.65 dev eth0 metric 100 table 100
 	ip route del default via 172.16.32.10 dev eth1 metric 10
-	#ip route del default via ${ETH0_GW} dev eth0 metric 100 table 100
 	ip a del 172.16.32.${OCTET}/26 dev eth1
 	ip link set eth1 down
 
