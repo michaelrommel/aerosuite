@@ -1,5 +1,5 @@
 export AWS_S3_REGION=eu-west-2
 export AWS_S3_BUCKET=dev-s3-aeroftp
-export FTP_PASSIVE_PORT_START=30000
-export FTP_PASSIVE_PORT_END=49999
+export FTP_PASSIVE_PORT_START=xxxxx
+export FTP_PASSIVE_PORT_END=xxxxx
 export RUST_LOG=trace

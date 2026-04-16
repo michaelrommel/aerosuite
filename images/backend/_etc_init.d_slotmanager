@@ -11,6 +11,8 @@ description_stop="Stopping heartbeat daemon and releasing slot"
 : ${TTL_MS:="30000"}
 : ${INTERVAL:="10"}
 : ${LOGFILE:="/var/log/slotmanager.log"}
+: ${FTP_PASSIVE_PORT_MIN:="30000"}
+: ${FTP_PASSIVE_PORT_COUNT="2000"}
 
 # These are used by OpenRC's built-in status / stop logic
 pidfile="/var/run/slotmanager/heartbeat.pid"
@@ -43,7 +45,7 @@ start_pre() {
 start() {
 	ebegin "Starting slotmanager"
 
-	# ── Step 1: get instance info from AWS ───────────────────────────────────
+	# ── get instance info from AWS ───────────────────────────────────
 	einfo "Fetching instance info from AWS ..."
 
 	local info_out
@@ -59,7 +61,7 @@ start() {
 
 	. ${conf_file} 
 
-	# ── Step 2: claim a slot ─────────────────────────────────────────────────
+	# ── claim a slot ─────────────────────────────────────────────────
 	einfo "Claiming slot from pool (instance-id: ${INSTANCE_ID}) ..."
 
 	local claim_out
@@ -98,7 +100,19 @@ start() {
 		return 1
 	}
 
-	# ── Step 3: launch the heartbeat daemon ──────────────────────────────────
+	# ── determine passive port range ─────────────────────────────────────────────────
+	# now depending on the slot number we need to reserve a matching range of ports for
+	# the passive connections, that do not overlap with other instances.
+	FTP_PASSIVE_PORT_START=$((FTP_PASSIVE_PORT_MIN + FTP_PASSIVE_PORT_COUNT * SLOT))
+    FTP_PASSIVE_PORT_END=$((FTP_PASSIVE_PORT_START + FTP_PASSIVE_PORT_COUNT - 1))
+	FTP_PASSIVE_PORT_RANGE="${FTP_PASSIVE_PORT_START}-${FTP_PASSIVE_PORT_END}"
+
+	sed -i "/FTP_PASSIVE_PORT_START/!b; c FTP_PASSIVE_PORT_START=${FTP_PASSIVE_PORT_START}" /etc/conf.d/aeroftp
+	sed -i "/FTP_PASSIVE_PORT_END/!b; c FTP_PASSIVE_PORT_END=${FTP_PASSIVE_PORT_END}" /etc/conf.d/aeroftp
+	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports = ${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf
+	grep -q "net.ipv4.ip_local_reserved_ports" /etc/sysctl.d/50-aeroftp.conf || echo "net.ipv4.ip_local_reserved_ports = ${FTP_PASSIVE_PORT_RANGE}" >> /etc/sysctl.d/50-aeroftp.conf
+
+	# ── launch the heartbeat daemon ──────────────────────────────────
 	# start-stop-daemon --background daemonises the process.
 	# --make-pidfile writes the PID so OpenRC can track and stop it.
 	# SIGTERM (sent by --stop below) is caught by the heartbeat command's
@@ -124,7 +138,7 @@ start() {
 stop() {
 	ebegin "Stopping slotmanager"
 
-	# ── Step 1: stop the heartbeat daemon ────────────────────────────────────
+	# ── stop the heartbeat daemon ────────────────────────────────────
 	# Send SIGTERM; the heartbeat loop catches it and exits cleanly.
 	# Fall back to SIGKILL after 10 s if it has not exited.
 	start-stop-daemon --stop \
@@ -132,7 +146,7 @@ stop() {
 		--retry "TERM/10/KILL/5"
 	local daemon_rc=$?
 
-	# ── Step 2: release the slot back to the pool ────────────────────────────
+	# ── release the slot back to the pool ────────────────────────────
 	# Best-effort: a Redis outage must not block system shutdown.
 	# If this fails the lease will expire on its own after TTL_MS milliseconds.
 	if [ -f "${slot_file}" ]; then
