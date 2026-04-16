@@ -13,7 +13,7 @@ source "amazon-ebs" "alpine" {
   instance_type = "t3.micro"
   region        = "eu-west-2"
   vpc_id        = "vpc-0595e17ce290fb050"
-  subnet_id     = "subnet-0c48fb2dcd6ce6c10"
+  subnet_id     = "subnet-01b7cfc925f82cf7c"
 
   # Use an existing Alpine Linux AMI as the base
   # Find the latest: https://www.alpinelinux.org/cloud/
@@ -78,6 +78,26 @@ build {
       "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 redis conntrack-tools",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+    ]
+  }
+
+  # Install network interface tweaks
+  provisioner "file" {
+    source      = "./_etc_network_interfaces"
+    destination = "/tmp/_etc_network_interfaces"
+  }
+  provisioner "file" {
+    source      = "./_etc_dhcpcd.conf"
+    destination = "/tmp/_etc_dhcpcd.conf"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_dhcpcd.conf /etc/dhcpcd.conf",
+      "sudo chown root:root /etc/dhcpcd.conf",
+      "sudo mv /tmp/_etc_network_interfaces /etc/network/interfaces",
+      "sudo chown root:root /etc/network/interfaces",
+      "sudo chmod +x /etc/network/interfaces",
     ]
   }
 

@@ -34,7 +34,7 @@ depend() {
 	# Services that must start *after* slotmanager has a slot can declare:
 	#   depend() { need slotmanager; }
 	# in their own init script.
-	before ftpbackend
+	before aeroftp
 }
 
 start_pre() {
@@ -103,14 +103,14 @@ start() {
 	# ── determine passive port range ─────────────────────────────────────────────────
 	# now depending on the slot number we need to reserve a matching range of ports for
 	# the passive connections, that do not overlap with other instances.
-	FTP_PASSIVE_PORT_START=$((FTP_PASSIVE_PORT_MIN + FTP_PASSIVE_PORT_COUNT * SLOT))
+	FTP_PASSIVE_PORT_START=$((FTP_PASSIVE_PORT_MIN + FTP_PASSIVE_PORT_COUNT * slot))
     FTP_PASSIVE_PORT_END=$((FTP_PASSIVE_PORT_START + FTP_PASSIVE_PORT_COUNT - 1))
 	FTP_PASSIVE_PORT_RANGE="${FTP_PASSIVE_PORT_START}-${FTP_PASSIVE_PORT_END}"
 
 	sed -i "/FTP_PASSIVE_PORT_START/!b; c FTP_PASSIVE_PORT_START=${FTP_PASSIVE_PORT_START}" /etc/conf.d/aeroftp
 	sed -i "/FTP_PASSIVE_PORT_END/!b; c FTP_PASSIVE_PORT_END=${FTP_PASSIVE_PORT_END}" /etc/conf.d/aeroftp
-	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports = ${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf
-	grep -q "net.ipv4.ip_local_reserved_ports" /etc/sysctl.d/50-aeroftp.conf || echo "net.ipv4.ip_local_reserved_ports = ${FTP_PASSIVE_PORT_RANGE}" >> /etc/sysctl.d/50-aeroftp.conf
+	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf
+	grep -q "net.ipv4.ip_local_reserved_ports" /etc/sysctl.d/50-aeroftp.conf || echo "net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" >> /etc/sysctl.d/50-aeroftp.conf
 
 	# ── launch the heartbeat daemon ──────────────────────────────────
 	# start-stop-daemon --background daemonises the process.
