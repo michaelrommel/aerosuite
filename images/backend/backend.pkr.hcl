@@ -200,15 +200,9 @@ build {
     source      = "./_etc_init.d_aeroftp-routing"
     destination = "/tmp/_etc_init.d_aeroftp-routing"
   }
-  provisioner "file" {
-    source      = "./_etc_udhcpc_udhcpc.conf"
-    destination = "/tmp/_etc_udhcpc_udhcpc.conf"
-  }
 
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/_etc_udhcpc_udhcpc.conf /etc/udhcpc/udhcpc.conf.disabled",
-      "sudo chown root:root /etc/udhcpc/udhcpc.conf.disabled",
       "sudo mv /tmp/_etc_init.d_aeroftp-routing /etc/init.d/aeroftp-routing",
       "sudo chmod +x /etc/init.d/aeroftp-routing",
       "sudo rc-update add aeroftp-routing default",

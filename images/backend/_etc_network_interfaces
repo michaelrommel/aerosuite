@@ -1,0 +1,9 @@
+# default alpine-cloud-images network configuration
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+	udhcpc_opts -O router
+	post-up ip route add default via 172.16.32.65 dev eth0 table 100 metric 512
