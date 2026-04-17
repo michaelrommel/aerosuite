@@ -2,44 +2,42 @@
 
 description="Policy-based routing rules for aeroftp"
 
-OFFSET=20
+# Load defaults, then allow /etc/conf.d/aeroftp-routing to override them
+: ${BASE_IP:="172.16.32"}
+: ${BASE_MASK:="26"}
+: ${OFFSET:="20"}
 
 depend() {
     need net
     after nftables
-	after slotmanager
+	need slotmanager
     before aeroftp
 }
 
-fetch_interface(){
-	if [ ! -d "/sys/class/net/eth1" ]; then
+get_ip_from_slot() {
+	SLOT=$(cat /var/run/slotmanager/slot)
+	OCTET=$((SLOT + OFFSET))
+	echo ${BASE_IP}.${OCTET}/${BASE_MASK}
+}
 
-		einfo "Attaching network interface (${SLOT})"
-		manage-eni --slot "$SLOT" --attach  # uses INSTANCE_ID implicitly via IMDS
-
-		# Wait until AWS has attached the network
-		echo "Waiting for eth1 to appear..."
-		while [ ! -d "/sys/class/net/eth1" ]; do
-			sleep 1
-		done
-	fi
+get_ip_from_if() {
+	IF_IP=$(ip addr show dev eth1| grep "inet " | awk '{print $2}')
+	echo ${IF_IP}
 }
 
 start() {
 	ebegin "Applying aeroftp routing rules"
 
-	SLOT=$(cat /var/run/slotmanager/slot)
-	OCTET=$((SLOT + OFFSET))
-
-	fetch_interface
+	IP=$(get_ip_from_slot)
 
 	ip link set eth1 up
-	ip a add 172.16.32.${OCTET}/26 dev eth1
+	ip a add ${IP} dev eth1
 
 	# Add a new default route for all other traffic (FTP data)
 	ip route add default via 172.16.32.10 dev eth1 metric 10
 
 	# Copy the existing default gateway into table 100 so that
+
 	# fwmark-tagged packets (DNS, HTTP/S) reach the old gateway
 	# no longer needed, already achieved in /etc/network/interfaces
 	ip route add default via 172.16.32.65 dev eth0 metric 100 table 100
@@ -56,17 +54,17 @@ start() {
 stop() {
 	ebegin "Removing aeroftp routing rules"
 
-	SLOT=$(cat /var/run/slotmanager/slot)
-	OCTET=$((SLOT + OFFSET))
+	IP=$(get_ip_from_if)
 
 	ip rule del fwmark 13 table 100
-	#mv /etc/udhcpc/udhcpc.conf /etc/udhcpc/udhcpc.conf.disabled
-	#ip route add default via ${ETH0_GW} dev eth0
 	ip route add default via 172.16.32.65 dev eth0 metric 512
 	ip route del default via 172.16.32.65 dev eth0 metric 100 table 100
 	ip route del default via 172.16.32.10 dev eth1 metric 10
-	ip a del 172.16.32.${OCTET}/26 dev eth1
+	if [ -n "$IP" ]; then
+		ip a del ${IP} dev eth1
+	fi
 	ip link set eth1 down
 
 	eend $?
 }
+

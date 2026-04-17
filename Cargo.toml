@@ -9,13 +9,14 @@ libunftp = { path = "../libunftp", features = ["aws_lc_rs", "prometheus", "proxy
 tokio = { version = "1.48.0", features = ["signal", "macros", "rt-multi-thread", "tracing"] }
 opendal = { version = "0.55.0", default-features = false, features = ["services-azdls", "services-s3", "executors-tokio"] }
 anyhow = { version = "1.0.100" }
-log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unftp-sbe-opendal = { path = "../unftp-sbe-opendal" }
 unftp-auth-jsonfile = { path = "../libunftp/crates/unftp-auth-jsonfile" }
-pretty_env_logger = "0.5.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "default-tls", "json"]}
 reqsign = { version = "0.16.5", features = ["services-aws"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
 chrono = "0.4.43"
 async-trait = "0.1.88"
 # redis = { version = "1.0.2", default-features = false, features = ["tls-rustls", "acl", "geospatial", "num-bigint", "script", "streams"] }
@@ -36,7 +37,6 @@ prometheus = { version = "0.14.0", features = ["process"] }
 tokio_console = ["console-subscriber"]
 
 [dev-dependencies]
-serde_json = "1.0.149"
 aws-config = { version = "1.8.12", features = ["credentials-process", "rt-tokio", "behavior-version-latest"] }
 aws-types = "1.3.11"
 aws-credential-types = "1.2.11"

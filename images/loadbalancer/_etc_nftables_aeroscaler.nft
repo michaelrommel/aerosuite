@@ -1,0 +1,90 @@
+#
+# Netfilter Configuration for AeroFTP
+#
+# drop any existing nftables ruleset
+flush ruleset
+
+# a common table for both IPv4 and IPv6
+table inet filter {
+
+	# protocols to allow
+	set allowed_protocols {
+		type inet_proto
+		elements = { icmp, icmpv6 }
+	}
+
+	# interfaces to accept any traffic on
+	set allowed_interfaces {
+		type ifname
+		elements = { "lo" }
+	}
+
+	# services to allow
+	set allowed_tcp_dports {
+		type inet_service
+		flags interval
+		# this selection also allows traffic to the builtin
+		# webserver on port 9090 for /metrics and /status
+		elements = { 20, 21, 22, 53, 1024-65535 }
+	}
+	set allowed_udp_dports {
+		type inet_service
+		flags interval
+		elements = { 53 }
+	}
+
+	# this chain gathers all accept conditions
+	chain allow {
+		ct state established,related accept
+
+		meta l4proto @allowed_protocols accept
+		iifname @allowed_interfaces accept
+		udp dport @allowed_udp_dports accept
+		tcp dport @allowed_tcp_dports accept
+	}
+
+	# base-chain for traffic to this host
+	chain INPUT {
+		type filter hook input priority filter + 20
+		policy accept
+
+		jump allow
+		reject with icmpx type port-unreachable
+	}
+
+	chain OUTPUT {
+		type route hook output priority mangle
+		policy accept
+	}
+}
+
+table ip nat {
+	# interfaces to masquerade traffic from
+	set masq_interfaces {
+		type ifname
+		elements = { "eth1" }
+	}
+
+	# networks to masquerade traffic from
+	# 'interval' flag is required to support subnets
+	set masq_ips {
+		type ipv4_addr
+		flags interval
+		elements = { 172.16.32.0/26 }
+	}
+
+	chain do_snat {
+		snat to 172.16.29.100
+	}
+
+	# base-chain to manipulate conntrack in postrouting,
+	# will see packets for new or related traffic only
+	chain POSTROUTING {
+		type nat hook postrouting priority srcnat + 20
+		policy accept
+
+		iifname @masq_interfaces oifname != @masq_interfaces jump do_snat
+		ip saddr @masq_ips jump do_snat
+	}
+}
+

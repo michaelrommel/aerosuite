@@ -15,9 +15,6 @@ pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/aeroftp/aeroftp.log"
 error_log="/var/log/aeroftp/aeroftp.log"
 
-# Load variables from /etc/conf.d/aeroftp
-extra_started_commands="reload"
-
 depend() {
     need net
 	after slotmanager
