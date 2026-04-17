@@ -118,26 +118,31 @@ build {
     ]
   }
 
-  # Stage the binary via /tmp (writable by alpine), then move it into place
+  # redirect logging of keepalived
   provisioner "file" {
-    source      = "../../../aeroscaler/target/release/aws-config"
-    destination = "/tmp/aws-config"
-  }
-  provisioner "file" {
-    source      = "../../../aeroscaler/target/release/slot-pool-native"
-    destination = "/tmp/slot-pool-native"
+    source      = "./_etc_syslog.conf"
+    destination = "/tmp/_etc_syslog.conf"
   }
 
-  # Install and configure the interface management
   provisioner "shell" {
     inline = [
-      "sudo mkdir -p /usr/local/bin",
-      "sudo mv /tmp/aws-config /usr/local/bin/aws-config",
-      "sudo mv /tmp/slot-pool-native /usr/local/bin/slot-pool-native",
-      "sudo chown root:root /usr/local/bin/aws-config",
-      "sudo chown root:root /usr/local/bin/slot-pool-native",
-      "sudo chmod +x /usr/local/bin/aws-config",
-      "sudo chmod +x /usr/local/bin/slot-pool-native",
+      "sudo mkdir -p /var/log/keepalived",
+      "sudo mv /tmp/_etc_syslog.conf /etc/syslog.conf",
+      "sudo chown root:root /etc/syslog.conf",
+    ]
+  }
+
+  # Enable log rotation
+  provisioner "file" {
+    source      = "./_etc_logrotate.d_keepalived"
+    destination = "/tmp/_etc_logrotate.d_keepalived"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mkdir -p /etc/logrotate.d",
+      "sudo mv /tmp/_etc_logrotate.d_keepalived /etc/logrotate.d/keepalived",
+      "sudo chown root:root /etc/logrotate.d/keepalived",
     ]
   }
 
@@ -193,6 +198,10 @@ build {
     source      = "../../../aeroscaler/target/release/keepalived-config"
     destination = "/tmp/keepalived-config"
   }
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/attach-eni"
+    destination = "/tmp/attach-eni"
+  }
 
   # Install and configure the interface management
   provisioner "shell" {
@@ -201,12 +210,15 @@ build {
       "sudo mv /tmp/aws-config /usr/local/bin/aws-config",
       "sudo mv /tmp/assign-secondary-ip /usr/local/bin/assign-secondary-ip",
       "sudo mv /tmp/keepalived-config /usr/local/bin/keepalived-config",
+      "sudo mv /tmp/attach-eni /usr/local/bin/attach-eni",
       "sudo chown root:root /usr/local/bin/aws-config",
       "sudo chown root:root /usr/local/bin/assign-secondary-ip",
       "sudo chown root:root /usr/local/bin/keepalived-config",
+      "sudo chown root:root /usr/local/bin/attach-eni",
       "sudo chmod +x /usr/local/bin/aws-config",
       "sudo chmod +x /usr/local/bin/assign-secondary-ip",
       "sudo chmod +x /usr/local/bin/keepalived-config",
+      "sudo chmod +x /usr/local/bin/attach-eni",
     ]
   }
 
@@ -216,8 +228,8 @@ build {
     destination = "/tmp/_etc_init.d_keepalived"
   }
   provisioner "file" {
-    source      = "./_etc_conf.d_keepalived.conf"
-    destination = "/tmp/_etc_conf.d_keepalived.conf"
+    source      = "./_etc_conf.d_keepalived"
+    destination = "/tmp/_etc_conf.d_keepalived"
   }
   provisioner "file" {
     source      = "./_etc_keepalived_keepalived.conf"
@@ -227,28 +239,14 @@ build {
   provisioner "shell" {
     inline = [
       "sudo mkdir -p /etc/keepalived",
-      "sudo mv /tmp/_etc_conf.d_keepalived.conf /etc/conf.d/keepalived.conf",
+      "sudo mv /tmp/_etc_conf.d_keepalived /etc/conf.d/keepalived",
       "sudo mv /tmp/_etc_keepalived_keepalived.conf /etc/keepalived/keepalived.conf",
       "sudo mv /tmp/_etc_init.d_keepalived /etc/init.d/keepalived",
-      "sudo chown root:root /etc/conf.d/keepalived.conf",
+      "sudo chown root:root /etc/conf.d/keepalived",
       "sudo chown root:root /etc/keepalived/keepalived.conf",
       "sudo chown root:root /etc/init.d/keepalived",
       "sudo chmod +x /etc/init.d/keepalived",
       "sudo rc-update add keepalived default",
-    ]
-  }
-
-  # Enable log rotation
-  provisioner "file" {
-    source      = "./_etc_logrotate.d_keepalived"
-    destination = "/tmp/_etc_logrotate.d_keepalived"
-  }
-
-  provisioner "shell" {
-    inline = [
-      "sudo mkdir -p /etc/logrotate.d",
-      "sudo mv /tmp/_etc_logrotate.d_keepalived /etc/logrotate.d/keepalived",
-      "sudo chown root:root /etc/logrotate.d/keepalived",
     ]
   }
 
