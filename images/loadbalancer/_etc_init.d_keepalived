@@ -46,6 +46,34 @@ stats() {
 	cat /tmp/keepalived.stats
 }
 
-pre_start() {
+start_pre() {
+	TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+		-H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+	if [ -z "$TOKEN" ]; then
+		eerror "Failed to fetch IMDSv2 Token"
+		return 1
+	fi
+
+	ROLE=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
+		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-role)
+
+	if [ "$ROLE" == "master" ]; then
+		IP="172.16.32.15/26"
+	else
+		IP="172.16.32.16/26"
+	fi
+
+	attach-eni --tag aeroftp-lb=$ROLE --attach --region ${REGION}
+
+	einfo "Waiting for eth1 to appear..."
+	while [ ! -d "/sys/class/net/eth1" ]; do
+		sleep 1
+	done
+
+	ip link set eth1 up
+	ip a add $IP dev eth1
+
 	/usr/local/bin/keepalived-config --auth-pass "$VRRP_PASS"
 }
+

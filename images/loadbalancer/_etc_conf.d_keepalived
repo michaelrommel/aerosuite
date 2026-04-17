@@ -10,6 +10,6 @@
 
 # Additional options to pass to the keepalived command.
 # See keepalived(8) man page.
-command_args="-D -G -g /var/log/keepalived/keepalived.log"
+command_args="-S local3"
 
 VRRP_PASS="ThisIsALongStringThatWeWillChangeLater"
