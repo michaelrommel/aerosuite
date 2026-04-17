@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Error};
 use chrono::{DateTime, TimeZone, Utc};
-use log::{debug, info, trace};
+use tracing::{debug, info, instrument, trace};
 use reqsign::AwsCredential;
 use reqwest::Client;
 use serde::Deserialize;
@@ -472,6 +472,7 @@ impl CachingAwsCredentialLoader {
     /// }
     /// ```
     #[must_use = "cache_check result indicates whether credentials need refresh"]
+    #[instrument(skip(self))]
     pub async fn cache_check(&self) -> Option<AwsCreds> {
         // the read lock is scoped to this line, we then work on the clone.
         // if we do not clone, the read lock is extended to more lines, which could
@@ -526,6 +527,7 @@ impl CachingAwsCredentialLoader {
     ///     Ok(())
     /// }
     /// ```
+    #[instrument(skip(self, client))]
     pub async fn get_ec2_credentials(&self, client: Client) -> Result<AwsCreds, Error> {
         let temp_token = client
             .put(EC2_METADATA_TOKEN_URL)
@@ -600,6 +602,7 @@ impl CachingAwsCredentialLoader {
     ///     Ok(())
     /// }
     /// ```
+    #[instrument(skip(self, client), fields(url = %url))]
     pub async fn get_ecs_credentials(
         &self,
         client: Client,
@@ -659,6 +662,7 @@ impl CachingAwsCredentialLoader {
     ///     Ok(())
     /// }
     /// ```
+    #[instrument(skip(self, client))]
     pub async fn provision_credentials(&self, client: Client) -> Result<AwsCreds, Error> {
         let url = if let Ok(full_uri) = std::env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI") {
             Some(full_uri)

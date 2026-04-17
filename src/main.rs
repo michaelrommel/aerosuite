@@ -13,34 +13,19 @@ mod http;
 mod metrics;
 mod signal;
 
-use log::{error, info, warn};
+use tracing::{error, info, warn};
 use tokio::task::JoinSet;
+use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[cfg(feature = "tokio_console")]
-use std::net::SocketAddr;
+use http::FilterHandle;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    pretty_env_logger::init();
+    // Keep the handle alive for the duration of the program so the
+    // /config endpoint can update the log level at runtime.
+    let filter_handle = init_tracing()?;
 
-    #[cfg(feature = "tokio_console")]
-    {
-        use anyhow::{bail, Context};
-        use console_subscriber::ConsoleLayer;
-        let console_addr: SocketAddr = "127.0.0.1:6669"
-            .parse()
-            .context("could not parse tokio-console address")?;
-
-        // Convert SocketAddr to the format expected by console_subscriber
-        let (ip, port) = match console_addr {
-            SocketAddr::V4(addr) => (addr.ip().octets(), addr.port()),
-            SocketAddr::V6(_) => bail!("tokio-console only supports IPv4 addresses"),
-        };
-
-        ConsoleLayer::builder().server_addr((ip, port)).init();
-    }
-
-    run().await?;
+    run(filter_handle).await?;
 
     Ok(())
 }
@@ -50,13 +35,13 @@ async fn main() -> anyhow::Result<()> {
 /// Spawns the HTTP metrics server, starts the FTP server, and listens for
 /// signals. Restarts on HUP signal, exits on INT/TERM.
 ///
+/// # Arguments
+/// * `filter_handle` - Tracing reload handle forwarded to the HTTP server
+///
 /// # Returns
 /// * `Ok(())` - Application exited normally
-async fn run() -> anyhow::Result<()> {
-    // We wait for a signal (HUP, INT, TERM). If the signal is a HUP,
-    // we restart, otherwise we exit the loop and the program ends.
-    // any error should bubble up to the main function
-    while main_task().await? == signal::ExitSignal::Hup {
+async fn run(filter_handle: FilterHandle) -> anyhow::Result<()> {
+    while main_task(filter_handle.clone()).await? == signal::ExitSignal::Hup {
         info!("Restarting on HUP");
     }
     info!("Exiting");
@@ -70,7 +55,7 @@ async fn run() -> anyhow::Result<()> {
 /// # Returns
 /// * `Ok(ExitSignal::Hup)` - Restart requested
 /// * `Ok(ExitSignal::Int|Term)` - Exit requested
-async fn main_task() -> anyhow::Result<signal::ExitSignal> {
+async fn main_task(filter_handle: FilterHandle) -> anyhow::Result<signal::ExitSignal> {
     const BROADCAST_CAPACITY: usize = 32;
     const METRICS_BIND_ADDRESS: &str = "[::]:9090";
 
@@ -83,7 +68,7 @@ async fn main_task() -> anyhow::Result<signal::ExitSignal> {
 
     // Spawn HTTP metrics server
     join_set.spawn(async move {
-        if let Err(e) = http::start(METRICS_BIND_ADDRESS, http_receiver).await {
+        if let Err(e) = http::start(METRICS_BIND_ADDRESS, filter_handle, http_receiver).await {
             error!("HTTP Server error: {}", e);
         }
     });
@@ -115,4 +100,46 @@ async fn main_task() -> anyhow::Result<signal::ExitSignal> {
             Err(e)
         }
     }
+}
+
+/// Initialise tracing and return a handle for adjusting the filter at runtime.
+///
+/// Bridges `log::` macros so existing call sites require no changes.
+/// `RUST_LOG` is honoured at startup (e.g. `RUST_LOG=aeroftp=debug`).
+///
+/// When the `tokio_console` feature is enabled, the Tokio Console layer is
+/// added automatically on `127.0.0.1:6669`.
+fn init_tracing() -> anyhow::Result<FilterHandle> {
+    let filter = EnvFilter::from_default_env();
+    let (filter_layer, handle) = reload::Layer::new(filter);
+
+    let registry = tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(tracing_subscriber::fmt::layer());
+
+    #[cfg(not(feature = "tokio_console"))]
+    registry.init();
+
+    #[cfg(feature = "tokio_console")]
+    {
+        use anyhow::{bail, Context};
+        use std::net::SocketAddr;
+
+        let console_addr: SocketAddr = "127.0.0.1:6669"
+            .parse()
+            .context("could not parse tokio-console address")?;
+
+        let (ip, port) = match console_addr {
+            SocketAddr::V4(addr) => (addr.ip().octets(), addr.port()),
+            SocketAddr::V6(_) => bail!("tokio-console only supports IPv4 addresses"),
+        };
+
+        let console_layer = console_subscriber::ConsoleLayer::builder()
+            .server_addr((ip, port))
+            .spawn();
+
+        registry.with(console_layer).init();
+    }
+
+    Ok(handle)
 }

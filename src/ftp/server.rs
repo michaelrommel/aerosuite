@@ -3,7 +3,7 @@ use libunftp::options::{ActivePassiveMode, PassiveHost};
 use opendal::{services::S3, Operator};
 
 use crate::aws::CachingAwsCredentialLoader;
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
 

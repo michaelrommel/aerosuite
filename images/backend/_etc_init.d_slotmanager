@@ -7,6 +7,7 @@ description_stop="Stopping heartbeat daemon and releasing slot"
 # Load defaults, then allow /etc/conf.d/slotmanager to override them
 : ${AWS_CONFIG_BINARY:="/usr/local/bin/aws-config"}
 : ${SLOT_POOL_BINARY:="/usr/local/bin/slot-pool-native"}
+: ${MANAGE_ENI_BINARY:="/usr/local/bin/manate-eni"}
 : ${REDIS_URL:="redis://127.0.0.1:6379"}
 : ${TTL_MS:="30000"}
 : ${INTERVAL:="10"}
@@ -20,31 +21,7 @@ conf_file="/var/run/slotmanager/aws.conf"
 slot_file="/var/run/slotmanager/slot"
 run_dir="/var/run/slotmanager"
 
-# Load variables from /etc/conf.d/slotmanager
-extra_started_commands="reload"
-
-depend() {
-	# Hard dependency: networking must be up to reach Redis
-	need net
-
-	# Soft dependency: if a local 'redis' service exists, start after it —
-	# but do not fail if it is absent (Redis may be remote).
-	use redis
-
-	# Services that must start *after* slotmanager has a slot can declare:
-	#   depend() { need slotmanager; }
-	# in their own init script.
-	before aeroftp
-}
-
-start_pre() {
-	# Ensure the runtime directory exists with correct permissions
-	checkpath --directory --owner root:root --mode 0750 "${run_dir}"
-}
-
-start() {
-	ebegin "Starting slotmanager"
-
+get_aws_config() {
 	# ── get instance info from AWS ───────────────────────────────────
 	einfo "Fetching instance info from AWS ..."
 
@@ -58,9 +35,9 @@ start() {
 		eend 1
 		return 1
 	fi
+}
 
-	. ${conf_file} 
-
+claim_slot() {
 	# ── claim a slot ─────────────────────────────────────────────────
 	einfo "Claiming slot from pool (instance-id: ${INSTANCE_ID}) ..."
 
@@ -99,7 +76,27 @@ start() {
 		eend 1
 		return 1
 	}
+}
 
+release_slot() {
+	# ── release the slot back to the pool ────────────────────────────
+	# Best-effort: a Redis outage must not block system shutdown.
+	# If this fails the lease will expire on its own after TTL_MS milliseconds.
+	slot=$1
+
+	. ${conf_file} 
+	if printf '%s' "${slot}" | grep -qE '^[0-9]+$'; then
+		einfo "Releasing slot ${slot} ..."
+		REDIS_URL="${REDIS_URL}" \
+			"${SLOT_POOL_BINARY}" release \
+				--slot "${slot}" \
+				--instance-id "${INSTANCE_ID}" \
+			|| ewarn "Slot release failed — slot ${slot} will expire after TTL (${TTL_MS} ms)"
+	fi
+}
+
+set_passive_range() {
+	slot=$1
 	# ── determine passive port range ─────────────────────────────────────────────────
 	# now depending on the slot number we need to reserve a matching range of ports for
 	# the passive connections, that do not overlap with other instances.
@@ -107,10 +104,73 @@ start() {
     FTP_PASSIVE_PORT_END=$((FTP_PASSIVE_PORT_START + FTP_PASSIVE_PORT_COUNT - 1))
 	FTP_PASSIVE_PORT_RANGE="${FTP_PASSIVE_PORT_START}-${FTP_PASSIVE_PORT_END}"
 
+	# set it for the AeroFTP daemon
 	sed -i "/FTP_PASSIVE_PORT_START/!b; c FTP_PASSIVE_PORT_START=${FTP_PASSIVE_PORT_START}" /etc/conf.d/aeroftp
 	sed -i "/FTP_PASSIVE_PORT_END/!b; c FTP_PASSIVE_PORT_END=${FTP_PASSIVE_PORT_END}" /etc/conf.d/aeroftp
+
+	# set it for the ip stack
 	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf
 	grep -q "net.ipv4.ip_local_reserved_ports" /etc/sysctl.d/50-aeroftp.conf || echo "net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" >> /etc/sysctl.d/50-aeroftp.conf
+	sysctl -p /etc/sysctl.d/50-aeroftp.conf
+}
+
+attach_interface() {
+	slot=$1
+	# ── next grab the interface and attach it to this instance ──────────────────────────────────
+	if [ ! -d "/sys/class/net/eth1" ]; then
+		einfo "Attaching network interface (${slot})"
+		${MANAGE_ENI_BINARY} --slot "$slot" --attach  # uses INSTANCE_ID implicitly via IMDS
+		einfo "Waiting for eth1 to appear..."
+		while [ ! -d "/sys/class/net/eth1" ]; do
+			sleep 1
+		done
+	else
+		ewarn "Interface already exists, check slot!"
+	fi
+}
+
+detach_interface() {
+	slot=$1
+	# ── detach and release the interface to the pool ──────────────────────────────────
+	${MANAGE_ENI_BINARY} --slot "$slot" --detach
+	if [ -d "/sys/class/net/eth1" ]; then
+		einfo "Waiting for eth1 to disappear..."
+		while [ -d "/sys/class/net/eth1" ]; do
+			sleep 1
+		done
+	else
+		ewarn "Interface did not exist, check slot!"
+	fi
+}
+
+depend() {
+	# Hard dependency: networking must be up to reach Redis
+	need net
+
+	# Soft dependency: if a local 'redis' service exists, start after it —
+	# but do not fail if it is absent (Redis may be remote).
+	use redis
+
+	# Services that must start *after* slotmanager has a slot can declare:
+	#   depend() { need slotmanager; }
+	# in their own init script.
+	before aeroftp
+}
+
+start_pre() {
+	# Ensure the runtime directory exists with correct permissions
+	checkpath --directory --owner root:root --mode 0750 "${run_dir}"
+}
+
+start() {
+	ebegin "Starting slotmanager"
+
+	get_aws_config
+	. ${conf_file} 
+	claim_slot
+	slot=$(cat "${slot_file}")
+	set_passive_range $slot
+	attach_interface $slot
 
 	# ── launch the heartbeat daemon ──────────────────────────────────
 	# start-stop-daemon --background daemonises the process.
@@ -146,26 +206,21 @@ stop() {
 		--retry "TERM/10/KILL/5"
 	local daemon_rc=$?
 
-	# ── release the slot back to the pool ────────────────────────────
-	# Best-effort: a Redis outage must not block system shutdown.
-	# If this fails the lease will expire on its own after TTL_MS milliseconds.
 	if [ -f "${slot_file}" ]; then
 		local slot
 		slot=$(cat "${slot_file}")
-
-		. ${conf_file} 
-		if printf '%s' "${slot}" | grep -qE '^[0-9]+$'; then
-			einfo "Releasing slot ${slot} ..."
-			REDIS_URL="${REDIS_URL}" \
-				"${SLOT_POOL_BINARY}" release \
-					--slot "${slot}" \
-					--instance-id "${INSTANCE_ID}" \
-				|| ewarn "Slot release failed — slot ${slot} will expire after TTL (${TTL_MS} ms)"
-		fi
-
+		detach_interface $slot
+		release_slot $slot
 		rm -f "${slot_file}"
 	fi
 
 	# Report success/failure based on the daemon stop, not the release step
 	eend ${daemon_rc}
 }
+
+stop_post() {
+	if [ "$RC_CMD" = "restart" ]; then
+		sleep 5
+	fi
+}
+

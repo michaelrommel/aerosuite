@@ -1,14 +1,14 @@
 #
-# Packer file for creating the backend AMI image
+# Packer file for creating the loadbalancer AMI image
 #
 # Run this with packer build backend.pkr.hcl from this directory.
-# You need to have build the aeroftp application in the development docker
+# You need to have build the aeroscaler application in the development docker
 # container with:
-# cargo build --release --bin aeroftp --target x86_64-unknown-linux-musl
+# cargo build --release --bin aeroscaler --target x86_64-unknown-linux-musl
 #
 
 source "amazon-ebs" "alpine" {
-  ami_name      = "aeroftp-alpine-{{timestamp}}"
+  ami_name      = "aeroscaler-alpine-{{timestamp}}"
   # we need t3 because the images use uefi
   instance_type = "t3.micro"
   region        = "eu-west-2"
@@ -62,7 +62,7 @@ source "amazon-ebs" "alpine" {
   ssh_bastion_agent_auth = true  # bastion leg: use agent key
 
   tags = {
-    Name        = "aeroftp-alpine"
+    Name        = "aeroscaler-alpine"
     Environment = "production"
     BuildDate   = "{{timestamp}}"
   }
@@ -75,29 +75,9 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 redis conntrack-tools",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 redis conntrack-tools keepalived",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
-    ]
-  }
-
-  # Install network interface tweaks
-  provisioner "file" {
-    source      = "./_etc_network_interfaces"
-    destination = "/tmp/_etc_network_interfaces"
-  }
-  provisioner "file" {
-    source      = "./_etc_dhcpcd.conf"
-    destination = "/tmp/_etc_dhcpcd.conf"
-  }
-
-  provisioner "shell" {
-    inline = [
-      "sudo mv /tmp/_etc_dhcpcd.conf /etc/dhcpcd.conf",
-      "sudo chown root:root /etc/dhcpcd.conf",
-      "sudo mv /tmp/_etc_network_interfaces /etc/network/interfaces",
-      "sudo chown root:root /etc/network/interfaces",
-      "sudo chmod +x /etc/network/interfaces",
     ]
   }
 
@@ -144,10 +124,6 @@ build {
     destination = "/tmp/aws-config"
   }
   provisioner "file" {
-    source      = "../../../aeroscaler/target/release/manage-eni"
-    destination = "/tmp/manage-eni"
-  }
-  provisioner "file" {
     source      = "../../../aeroscaler/target/release/slot-pool-native"
     destination = "/tmp/slot-pool-native"
   }
@@ -157,151 +133,122 @@ build {
     inline = [
       "sudo mkdir -p /usr/local/bin",
       "sudo mv /tmp/aws-config /usr/local/bin/aws-config",
-      "sudo mv /tmp/manage-eni /usr/local/bin/manage-eni",
       "sudo mv /tmp/slot-pool-native /usr/local/bin/slot-pool-native",
       "sudo chown root:root /usr/local/bin/aws-config",
-      "sudo chown root:root /usr/local/bin/manage-eni",
       "sudo chown root:root /usr/local/bin/slot-pool-native",
       "sudo chmod +x /usr/local/bin/aws-config",
-      "sudo chmod +x /usr/local/bin/manage-eni",
       "sudo chmod +x /usr/local/bin/slot-pool-native",
-    ]
-  }
-
-  # Install the slotmanager OpenRC service
-  provisioner "file" {
-    source      = "./_etc_init.d_slotmanager"
-    destination = "/tmp/_etc_init.d_slotmanager"
-  }
-  provisioner "file" {
-    source      = "./_etc_conf.d_slotmanager"
-    destination = "/tmp/_etc_conf.d_slotmanager"
-  }
-
-  provisioner "shell" {
-    inline = [
-      "sudo mv /tmp/_etc_conf.d_slotmanager /etc/conf.d/slotmanager",
-      "sudo mv /tmp/_etc_init.d_slotmanager /etc/init.d/slotmanager",
-      "sudo chmod +x /etc/init.d/slotmanager",
-      "sudo rc-update add slotmanager default",
     ]
   }
 
   # Install sysctl tweaks
   provisioner "file" {
-    source      = "./_etc_sysctl.d_50-aeroftp.conf"
-    destination = "/tmp/_etc_sysctl.d_50-aeroftp.conf"
+    source      = "./_etc_sysctl.d_50-aeroscaler.conf"
+    destination = "/tmp/_etc_sysctl.d_50-aeroscaler.conf"
   }
 
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/_etc_sysctl.d_50-aeroftp.conf /etc/sysctl.d/50-aeroftp.conf",
-      "sudo chown root:root /etc/sysctl.d/50-aeroftp.conf",
+      "sudo mv /tmp/_etc_sysctl.d_50-aeroscaler.conf /etc/sysctl.d/50-aeroscaler.conf",
+      "sudo chown root:root /etc/sysctl.d/50-aeroscaler.conf",
+    ]
+  }
+
+  # Modules to load
+  provisioner "file" {
+    source      = "./_etc_modules-load.d_keepalived.conf"
+    destination = "/tmp/_etc_modules-load.d_keepalived.conf"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_modules-load.d_keepalived.conf /etc/modules-load.d/keepalived.conf",
+      "sudo chown root:root /etc/modules-load.d/keepalived.conf",
     ]
   }
 
   # Install nftables ruleset
   provisioner "file" {
-    source      = "./_etc_nftables_aeroftp.nft"
-    destination = "/tmp/_etc_nftables_aeroftp.nft"
+    source      = "./_etc_nftables_aeroscaler.nft"
+    destination = "/tmp/_etc_nftables_aeroscaler.nft"
   }
 
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/_etc_nftables_aeroftp.nft /etc/nftables.nft",
+      "sudo mv /tmp/_etc_nftables_aeroscaler.nft /etc/nftables.nft",
       "sudo chown root:root /etc/nftables.nft",
     ]
   }
 
-  # Install the aeroftp-routing OpenRC service
+  # Install all the helper applications for AWS management stuff
   provisioner "file" {
-    source      = "./_etc_init.d_aeroftp-routing"
-    destination = "/tmp/_etc_init.d_aeroftp-routing"
+    source      = "../../../aeroscaler/target/release/aws-config"
+    destination = "/tmp/aws-config"
   }
   provisioner "file" {
-    source      = "./_etc_conf.d_aeroftp-routing"
-    destination = "/tmp/_etc_conf.d_aeroftp-routing"
+    source      = "../../../aeroscaler/target/release/assign-secondary-ip"
+    destination = "/tmp/assign-secondary-ip"
+  }
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/keepalived-config"
+    destination = "/tmp/keepalived-config"
   }
 
+  # Install and configure the interface management
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/_etc_conf.d_aeroftp-routing /etc/conf.d/aeroftp-routing",
-      "sudo mv /tmp/_etc_init.d_aeroftp-routing /etc/init.d/aeroftp-routing",
-      "sudo chmod +x /etc/init.d/aeroftp-routing",
-      "sudo rc-update add aeroftp-routing default",
+      "sudo mkdir -p /usr/local/bin",
+      "sudo mv /tmp/aws-config /usr/local/bin/aws-config",
+      "sudo mv /tmp/assign-secondary-ip /usr/local/bin/assign-secondary-ip",
+      "sudo mv /tmp/keepalived-config /usr/local/bin/keepalived-config",
+      "sudo chown root:root /usr/local/bin/aws-config",
+      "sudo chown root:root /usr/local/bin/assign-secondary-ip",
+      "sudo chown root:root /usr/local/bin/keepalived-config",
+      "sudo chmod +x /usr/local/bin/aws-config",
+      "sudo chmod +x /usr/local/bin/assign-secondary-ip",
+      "sudo chmod +x /usr/local/bin/keepalived-config",
     ]
   }
 
-  # Create a dedicated aeroftp system user with a home directory
-  provisioner "shell" {
-    inline = [
-      "sudo addgroup -S aeroftp",
-      "sudo adduser -S -D -h /home/aeroftp -s /sbin/nologin -G aeroftp aeroftp",
-      "sudo mkdir -p /home/aeroftp",
-      "sudo chown aeroftp:aeroftp /home/aeroftp",
-    ]
-  }
-
-  # Stage the binary via /tmp (writable by alpine), then move it into place
+  # Configure the loadbalancer
   provisioner "file" {
-    source      = "../../target/release/aeroftp"
-    destination = "/tmp/aeroftp"
+    source      = "./_etc_init.d_keepalived"
+    destination = "/tmp/_etc_init.d_keepalived"
   }
-
-  # Install and configure the app
-  provisioner "shell" {
-    inline = [
-      "sudo mv /tmp/aeroftp /home/aeroftp/aeroftp",
-      "sudo chown aeroftp:aeroftp /home/aeroftp/aeroftp",
-      "sudo chmod +x /home/aeroftp/aeroftp",
-      "sudo setcap CAP_NET_BIND_SERVICE=+eip /home/aeroftp/aeroftp",
-    ]
-  }
-
-  # Stage the credentials file via /tmp (writable by alpine), then move it into place
   provisioner "file" {
-    source      = "./_home_aeroftp_credentials.json"
-    destination = "/tmp/_home_aeroftp_credentials.json"
+    source      = "./_etc_conf.d_keepalived.conf"
+    destination = "/tmp/_etc_conf.d_keepalived.conf"
+  }
+  provisioner "file" {
+    source      = "./_etc_keepalived_keepalived.conf"
+    destination = "/tmp/_etc_keepalived_keepalived.conf"
   }
 
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/_home_aeroftp_credentials.json /home/aeroftp/credentials.json",
-      "sudo chown aeroftp:aeroftp /home/aeroftp/credentials.json",
+      "sudo mkdir -p /etc/keepalived",
+      "sudo mv /tmp/_etc_conf.d_keepalived.conf /etc/conf.d/keepalived.conf",
+      "sudo mv /tmp/_etc_keepalived_keepalived.conf /etc/keepalived/keepalived.conf",
+      "sudo mv /tmp/_etc_init.d_keepalived /etc/init.d/keepalived",
+      "sudo chown root:root /etc/conf.d/keepalived.conf",
+      "sudo chown root:root /etc/keepalived/keepalived.conf",
+      "sudo chown root:root /etc/init.d/keepalived",
+      "sudo chmod +x /etc/init.d/keepalived",
+      "sudo rc-update add keepalived default",
     ]
   }
 
   # Enable log rotation
   provisioner "file" {
-    source      = "./_etc_logrotate.d_aeroftp"
-    destination = "/tmp/_etc_logrotate.d_aeroftp"
+    source      = "./_etc_logrotate.d_keepalived"
+    destination = "/tmp/_etc_logrotate.d_keepalived"
   }
 
   provisioner "shell" {
     inline = [
       "sudo mkdir -p /etc/logrotate.d",
-      "sudo mv /tmp/_etc_logrotate.d_aeroftp /etc/logrotate.d/aeroftp",
-      "sudo chown root:root /etc/logrotate.d/aeroftp",
-    ]
-  }
-
-  # Write default service environment configuration
-  provisioner "file" {
-    source      = "./_etc_conf.d_aeroftp"
-    destination = "/tmp/_etc_conf.d_aeroftp"
-  }
-  provisioner "file" {
-    source      = "./_etc_init.d_aeroftp"
-    destination = "/tmp/_etc_init.d_aeroftp"
-  }
-
-  provisioner "shell" {
-    inline = [
-      "sudo mkdir -p /etc/conf.d",
-      "sudo mv /tmp/_etc_conf.d_aeroftp /etc/conf.d/aeroftp",
-      "sudo mv /tmp/_etc_init.d_aeroftp /etc/init.d/aeroftp",
-      "sudo chmod +x /etc/init.d/aeroftp",
-      "sudo rc-update add aeroftp default",
+      "sudo mv /tmp/_etc_logrotate.d_keepalived /etc/logrotate.d/keepalived",
+      "sudo chown root:root /etc/logrotate.d/keepalived",
     ]
   }
 
