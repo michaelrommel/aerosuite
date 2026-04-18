@@ -105,8 +105,8 @@ set_passive_range() {
 	FTP_PASSIVE_PORT_RANGE="${FTP_PASSIVE_PORT_START}-${FTP_PASSIVE_PORT_END}"
 
 	# set it for the AeroFTP daemon
-	sed -i "/FTP_PASSIVE_PORT_START/!b; c FTP_PASSIVE_PORT_START=${FTP_PASSIVE_PORT_START}" /etc/conf.d/aeroftp
-	sed -i "/FTP_PASSIVE_PORT_END/!b; c FTP_PASSIVE_PORT_END=${FTP_PASSIVE_PORT_END}" /etc/conf.d/aeroftp
+	sed -i "/FTP_PASSIVE_PORT_START/!b; c export FTP_PASSIVE_PORT_START=${FTP_PASSIVE_PORT_START}" /etc/conf.d/aeroftp
+	sed -i "/FTP_PASSIVE_PORT_END/!b; c export FTP_PASSIVE_PORT_END=${FTP_PASSIVE_PORT_END}" /etc/conf.d/aeroftp
 
 	# set it for the ip stack
 	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf

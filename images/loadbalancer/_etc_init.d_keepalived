@@ -26,6 +26,44 @@ depend() {
 	use net
 }
 
+# ── IMDS helpers ──────────────────────────────────────────────────────────────
+
+# Fetch an IMDSv2 session token and the keepalived-role instance tag,
+# storing results in the caller-supplied variable names.
+#
+# Usage:
+#   fetch_imds_role TOKEN_VAR ROLE_VAR
+#
+# On success both variables are set and the function returns 0.
+# On failure an eerror is printed and the function returns 1.
+fetch_imds_role() {
+	local _token_var="$1"
+	local _role_var="$2"
+
+	local _token
+	_token=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+		-H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+	if [ -z "$_token" ]; then
+		eerror "Failed to fetch IMDSv2 token"
+		return 1
+	fi
+
+	local _role
+	_role=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
+		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-role)
+
+	if [ -z "$_role" ]; then
+		eerror "Failed to fetch keepalived-role tag from IMDS"
+		return 1
+	fi
+
+	eval "${_token_var}=\"\${_token}\""
+	eval "${_role_var}=\"\${_role}\""
+}
+
+# ── Custom commands ───────────────────────────────────────────────────────────
+
 data() {
 	ebegin "Writing configuration data to /tmp/keepalived.data"
 	start-stop-daemon --pidfile $pidfile --signal USR1
@@ -46,25 +84,28 @@ stats() {
 	cat /tmp/keepalived.stats
 }
 
-start_pre() {
-	TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-		-H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+# ── Lifecycle hooks ───────────────────────────────────────────────────────────
 
-	if [ -z "$TOKEN" ]; then
-		eerror "Failed to fetch IMDSv2 Token"
+start_pre() {
+	local TOKEN ROLE
+	fetch_imds_role TOKEN ROLE || return 1
+
+	local attach_out
+	attach_out=$(attach-eni \
+		--tag aeroftp-lb=$ROLE \
+		--attach \
+		--region ${REGION})
+	local attach_rc=$?
+
+	if [ ${attach_rc} -ne 0 ]; then
+		eerror "attach ENI failed (exit ${attach_rc}):"
+		eerror "${attach_out}"
+		eend 1
 		return 1
 	fi
 
-	ROLE=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
-		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-role)
-
-	if [ "$ROLE" == "master" ]; then
-		IP="172.16.32.15/26"
-	else
-		IP="172.16.32.16/26"
-	fi
-
-	attach-eni --tag aeroftp-lb=$ROLE --attach --region ${REGION}
+	local IP
+	IP=$(printf '%s' "${attach_out}" | grep "ENI primary private IP:" | sed -e 's/.*IP: \(.*\)/\1/')
 
 	einfo "Waiting for eth1 to appear..."
 	while [ ! -d "/sys/class/net/eth1" ]; do
@@ -72,8 +113,87 @@ start_pre() {
 	done
 
 	ip link set eth1 up
-	ip a add $IP dev eth1
+	ip a add $IP/26 dev eth1
+
+	# Sleep before starting keepalived so eth1 is fully initialised and the
+	# unicast path to the peer is reachable.  Without this delay the VRRP dead
+	# interval (3 × advert_int = 3 s) may expire before the first heartbeat
+	# arrives, causing this node to elect itself MASTER instead of honouring
+	# nopreempt.
+	sleep 5
+
+	mkdir -p /etc/keepalived/weights
+
+	# All backends start in draining state (weight file = -1).
+	# A separate process will set each file to 0 (active) or -2147483648
+	# (removed) based on actual backend health.
+	for ip in \
+		172.16.32.20 \
+		172.16.32.21 \
+		172.16.32.22 \
+		172.16.32.23 \
+		172.16.32.24 \
+		172.16.32.25 \
+		172.16.32.26 \
+		172.16.32.27 \
+		172.16.32.28 \
+		172.16.32.29 \
+		172.16.32.30 \
+		172.16.32.31 \
+		172.16.32.32 \
+		172.16.32.33 \
+		172.16.32.34 \
+		172.16.32.35 \
+		172.16.32.36 \
+		172.16.32.37 \
+		172.16.32.38 \
+		172.16.32.39 \
+		; do
+		WF="/etc/keepalived/weights/backend-${ip}.weight"
+		if [ ! -f "$WF" ]; then
+			# only create if not already present
+			echo "-1" > "$WF"
+		fi
+	done
 
 	/usr/local/bin/keepalived-config --auth-pass "$VRRP_PASS"
+
+	chown root:root /etc/keepalived/notify-master.sh
+	chown root:root /etc/keepalived/notify-backup.sh
+	chown root:root /etc/keepalived/chk-backends.sh
+	chown root:root /etc/keepalived/chk-forward-path.sh
+	chmod 755 /etc/keepalived/notify-master.sh
+	chmod 755 /etc/keepalived/notify-backup.sh
+	chmod 755 /etc/keepalived/chk-backends.sh
+	chmod 755 /etc/keepalived/chk-forward-path.sh
 }
 
+stop_post() {
+	# ── Remove the inside IP from eth1 ───────────────────────────────────────
+	# Read the current address directly from the interface so stop_post is
+	# self-contained and does not rely on any variable set during start_pre.
+	local INSIDE_IP
+	INSIDE_IP=$(ip -4 addr show eth1 2>/dev/null | awk '/inet / { print $2 }')
+
+	if [ -n "$INSIDE_IP" ]; then
+		einfo "Removing inside IP ${INSIDE_IP} from eth1"
+		ip addr del "$INSIDE_IP" dev eth1
+	fi
+
+	# ── Bring eth1 down ───────────────────────────────────────────────────────
+	if [ -d "/sys/class/net/eth1" ]; then
+		einfo "Bringing eth1 down"
+		ip link set eth1 down
+	fi
+
+	# ── Detach the inside ENI ─────────────────────────────────────────────────
+	local TOKEN ROLE
+	fetch_imds_role TOKEN ROLE || return 1
+
+	ebegin "Detaching inside ENI (aeroftp-lb=${ROLE})"
+	attach-eni \
+		--tag aeroftp-lb="$ROLE" \
+		--detach \
+		--region ${REGION}
+	eend $?
+}

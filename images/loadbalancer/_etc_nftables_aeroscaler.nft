@@ -65,13 +65,13 @@ table ip nat {
 		elements = { "eth1" }
 	}
 
-	# networks to masquerade traffic from
-	# 'interval' flag is required to support subnets
-	set masq_ips {
-		type ipv4_addr
-		flags interval
-		elements = { 172.16.32.0/26 }
-	}
+	# # networks to masquerade traffic from
+	# # 'interval' flag is required to support subnets
+	# set masq_ips {
+	# 	type ipv4_addr
+	# 	flags interval
+	# 	elements = { 172.16.32.0/26 }
+	# }
 
 	chain do_snat {
 		snat to 172.16.29.100
@@ -84,7 +84,7 @@ table ip nat {
 		policy accept
 
 		iifname @masq_interfaces oifname != @masq_interfaces jump do_snat
-		ip saddr @masq_ips jump do_snat
+		# ip saddr @masq_ips jump do_snat
 	}
 }
 
