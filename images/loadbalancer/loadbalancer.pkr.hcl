@@ -75,7 +75,7 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 redis conntrack-tools keepalived",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl tcpdump binutils logrotate iproute2 redis conntrack-tools keepalived ipvsadm",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
     ]
@@ -118,7 +118,7 @@ build {
     ]
   }
 
-  # redirect logging of keepalived
+  # redirect logging of keepalived by using the local3 facility
   provisioner "file" {
     source      = "./_etc_syslog.conf"
     destination = "/tmp/_etc_syslog.conf"
@@ -239,6 +239,7 @@ build {
   provisioner "shell" {
     inline = [
       "sudo mkdir -p /etc/keepalived",
+      "sudo adduser -S -D -H -s /sbin/nologin keepalived_script",
       "sudo mv /tmp/_etc_conf.d_keepalived /etc/conf.d/keepalived",
       "sudo mv /tmp/_etc_keepalived_keepalived.conf /etc/keepalived/keepalived.conf",
       "sudo mv /tmp/_etc_init.d_keepalived /etc/init.d/keepalived",

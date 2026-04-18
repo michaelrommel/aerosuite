@@ -12,4 +12,4 @@
 # See keepalived(8) man page.
 command_args="-S local3"
 
-VRRP_PASS="ThisIsALongStringThatWeWillChangeLater"
+export VRRP_PASS="c0fWm,qY"
