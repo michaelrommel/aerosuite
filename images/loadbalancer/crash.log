@@ -1,0 +1,557 @@
+2026/04/19 00:54:08 [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-builder-amazon-ebs"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: args: []string{"packer-builder-amazon-ebs"}
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: Plugin address: unix /tmp/packer-plugin568873788
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin568873788
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: Serving a plugin connection...
+2026/04/19 00:54:08 packer-builder-amazon-ebs plugin: [INFO] (aws): No AWS timeout and polling overrides have been set. Packer will default to waiter-specific delays and timeouts. If you would like to customize the length of time between retries and max number of retries you may do so by setting the environment variables AWS_POLL_DELAY_SECONDS and AWS_MAX_ATTEMPTS or the configuration options aws_polling_delay_seconds and aws_polling_max_attempts to your desired values.
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin1735848875
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1735848875
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin2189154286
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin2189154286
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3214234052
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3214234052
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin1388254422
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1388254422
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin3277199821
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3277199821
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin2196974672
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin2196974672
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3023696389
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3023696389
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin1064191563
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1064191563
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3465501473
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3465501473
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin665236519
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin665236519
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin1435773251
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1435773251
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin1868857664
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1868857664
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3580545763
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3580545763
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin1259436683
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1259436683
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3784766950
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3784766950
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin4018686641
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin4018686641
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3161406133
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3161406133
+2026/04/19 00:54:08 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin2092090017
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin2092090017
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin3686874015
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3686874015
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin4025925288
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin4025925288
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin866547524
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin866547524
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin1148850441
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1148850441
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:08 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:08 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:08 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:08 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:08 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:08 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin264429251
+2026/04/19 00:54:08 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:08 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin264429251
+2026/04/19 00:54:08 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:08 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:08 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:08 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:09 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:09 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:09 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin1184775204
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:09 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin1184775204
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:09 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:09 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:09 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:09 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:09 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:09 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:09 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:09 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:09 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin2991394426
+2026/04/19 00:54:09 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:09 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin2991394426
+2026/04/19 00:54:09 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:09 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:09 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:09 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:09 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:09 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:09 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:09 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:09 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:09 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin3490143180
+2026/04/19 00:54:09 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3490143180
+2026/04/19 00:54:09 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:09 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:09 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:09 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-file"}
+2026/04/19 00:54:09 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:09 packer-provisioner-file plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:09 packer-provisioner-file plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:09 packer-provisioner-file plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:09 packer-provisioner-file plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-file plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-file plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:09 packer-provisioner-file plugin: args: []string{"packer-provisioner-file"}
+2026/04/19 00:54:09 packer-provisioner-file plugin: Plugin address: unix /tmp/packer-plugin2321179016
+2026/04/19 00:54:09 packer-provisioner-file plugin: Waiting for connection...
+2026/04/19 00:54:09 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin2321179016
+2026/04/19 00:54:09 packer-provisioner-file plugin: Serving a plugin connection...
+2026/04/19 00:54:09 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:09 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:09 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:09 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:09 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:09 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3957151248
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:09 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3957151248
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:09 Creating plugin client for path: /usr/bin/packer
+2026/04/19 00:54:09 Starting plugin: /usr/bin/packer []string{"/usr/bin/packer", "plugin", "packer-provisioner-shell"}
+2026/04/19 00:54:09 Waiting for RPC address for: /usr/bin/packer
+2026/04/19 00:54:09 packer-provisioner-shell plugin: [INFO] Packer version: 1.6.6 [go1.19.8 linux amd64]
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Checking 'PACKER_CONFIG' for a config file path
+2026/04/19 00:54:09 packer-provisioner-shell plugin: 'PACKER_CONFIG' not set; checking the default config file path
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Attempting to open config file: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-shell plugin: [WARN] Config file doesn't exist: /home/rommel/.packerconfig
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Setting cache directory: /home/rommel/software/aerosuite/aeroftp/images/loadbalancer/packer_cache
+2026/04/19 00:54:09 packer-provisioner-shell plugin: args: []string{"packer-provisioner-shell"}
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Plugin address: unix /tmp/packer-plugin3890246347
+2026/04/19 00:54:09 Received unix RPC address for /usr/bin/packer: addr is /tmp/packer-plugin3890246347
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Waiting for connection...
+2026/04/19 00:54:09 packer-provisioner-shell plugin: Serving a plugin connection...
+2026/04/19 00:54:09 ui: [1;32mamazon-ebs.alpine: output will be in this color.[0m
+2026/04/19 00:54:09 ui: 
+2026/04/19 00:54:09 Build debug mode: false
+2026/04/19 00:54:09 Force build: false
+2026/04/19 00:54:09 On error: 
+2026/04/19 00:54:09 Waiting on builds to complete...
+2026/04/19 00:54:09 Starting build run: amazon-ebs.alpine
+2026/04/19 00:54:09 Running builder: 
+2026/04/19 00:54:09 packer-builder-amazon-ebs plugin: [INFO] Attempting to use session-derived credentials
+2026/04/19 00:54:10 packer-builder-amazon-ebs plugin: [INFO] Successfully derived credentials from session
+2026/04/19 00:54:10 packer-builder-amazon-ebs plugin: [INFO] AWS Auth provider used: "SSOProvider"
+2026/04/19 00:54:10 packer-builder-amazon-ebs plugin: Found region ${REGION}
+2026/04/19 00:54:10 packer-builder-amazon-ebs plugin: [INFO] AWS Auth provider used: "SSOProvider"
+2026/04/19 00:54:10 ui: [1;32m==> amazon-ebs.alpine: Prevalidating any provided VPC information[0m
+2026/04/19 00:54:10 ui: [1;32m==> amazon-ebs.alpine: Prevalidating AMI Name: aeroscaler-alpine-1776552848[0m
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin: Using AMI Filters {
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:   Filters: [{
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:       Name: "root-device-type",
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:       Values: ["ebs"]
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:     },{
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:       Name: "virtualization-type",
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:       Values: ["hvm"]
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:     },{
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:       Name: "name",
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:       Values: ["alpine-3.23.3-x86_64-uefi-tiny-r0"]
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:     }],
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin:   Owners: ["538276064493"]
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin: }
+2026/04/19 00:54:11 ui: [0;32m    amazon-ebs.alpine: Found Image ID: ami-05388e6ae1b11f6b3[0m
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin: [INFO] Finding AZ and VpcId for the given subnet '${SUBNET_BACKEND_PUBLIC}'
+2026/04/19 00:54:11 packer-builder-amazon-ebs plugin: [INFO] AvailabilityZone found: '${REGION}b'
+2026/04/19 00:54:11 ui: [1;32m==> amazon-ebs.alpine: Creating temporary keypair: packer_69e40b90-71c3-ff4a-f177-77e7593b3e04[0m
+2026/04/19 00:54:12 packer-builder-amazon-ebs plugin: Using specified security groups: [${SECURITY_GROUP_FTP}]
+2026/04/19 00:54:12 packer-builder-amazon-ebs plugin: [DEBUG] base64 encoding user data...
+2026/04/19 00:54:12 ui: [1;32m==> amazon-ebs.alpine: Launching a source AWS instance...[0m
+2026/04/19 00:54:12 ui: [1;32m==> amazon-ebs.alpine: Adding tags to source instance[0m
+2026/04/19 00:54:12 ui: [0;32m    amazon-ebs.alpine: Adding tag: "Name": "Packer Builder"[0m
+2026/04/19 00:54:13 ui: [0;32m    amazon-ebs.alpine: Instance ID: i-0012f39520226f947[0m
+2026/04/19 00:54:13 ui: [1;32m==> amazon-ebs.alpine: Waiting for instance (i-0012f39520226f947) to become ready...[0m
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 ui error: Cancelling build after receiving interrupt
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 Cancelling builder after context cancellation context canceled
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-file plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 packer-provisioner-shell plugin: Received interrupt signal (count: 1). Ignoring.
+2026/04/19 00:54:14 ui error: [1;31m==> amazon-ebs.alpine: Error waiting for instance (i-0012f39520226f947) to become ready: RequestCanceled: waiter context canceled
+==> amazon-ebs.alpine: caused by: context canceled[0m
+2026/04/19 00:54:14 ui: [1;32m==> amazon-ebs.alpine: No volumes to clean up, skipping[0m
+2026/04/19 00:54:14 ui: [1;32m==> amazon-ebs.alpine: Deleting temporary keypair...[0m
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: panic: runtime error: invalid memory address or nil pointer dereference
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: [signal SIGSEGV: segmentation violation code=0x1 addr=0x8 pc=0x1893af0]
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: goroutine 23 [running]:
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: github.com/hashicorp/packer/builder/amazon/common.(*StepRunSourceInstance).Run(0xc000196c60, {0x44371e0, 0xc00053d880}, {0x44375d0, 0xc000570090})
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	github.com/hashicorp/packer/builder/amazon/common/step_run_source_instance.go:254 +0x1b30
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: github.com/hashicorp/packer/packer-plugin-sdk/multistep.(*BasicRunner).Run(0xc000570180, {0x44371e0, 0xc00053d880}, {0x44375d0, 0xc000570090})
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	github.com/hashicorp/packer/packer-plugin-sdk/multistep/basic_runner.go:70 +0x2de
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: github.com/hashicorp/packer/builder/amazon/ebs.(*Builder).Run(0xc00060d200, {0x44371e0, 0xc00053d880}, {0x443c888?, 0xc0005f7a10}, {0x4411780?, 0xc0005ad080})
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	github.com/hashicorp/packer/builder/amazon/ebs/builder.go:354 +0x2017
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: github.com/hashicorp/packer/packer-plugin-sdk/rpc.(*BuilderServer).Run(0xc0003b0b40, 0x6b0030?, 0xc0006b0010)
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	github.com/hashicorp/packer/packer-plugin-sdk/rpc/builder.go:117 +0x1e6
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: reflect.Value.call({0xc0001149c0?, 0xc000116338?, 0x13?}, {0x3d8f1e3, 0x4}, {0xc0000aaef8, 0x3, 0x3?})
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	reflect/value.go:584 +0x8c5
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: reflect.Value.Call({0xc0001149c0?, 0xc000116338?, 0x3?}, {0xc000652ef8?, 0x0?, 0xc0005f42a0?})
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	reflect/value.go:368 +0xbc
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: net/rpc.(*service).call(0xc0003b0b80, 0xc0005c7490?, 0x0?, 0xc000798870, 0xc000146600, 0xb8b085?, {0x31404c0?, 0xc0006b000c?, 0xb8b006?}, {0x307ea00, ...}, ...)
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	net/rpc/server.go:382 +0x226
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: created by net/rpc.(*Server).ServeCodec
+2026/04/19 00:54:14 packer-builder-amazon-ebs plugin: 	net/rpc/server.go:479 +0x3fe
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 ui error: [1;31mBuild 'amazon-ebs.alpine' errored after 5 seconds 752 milliseconds: unexpected EOF[0m
+2026/04/19 00:54:14 ui: 
+==> Wait completed after 5 seconds 752 milliseconds
+2026/04/19 00:54:14 ui: Cleanly cancelled builds after being interrupted.
+2026/04/19 00:54:14 waiting for all plugin processes to complete...
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited
+2026/04/19 00:54:14 /usr/bin/packer: plugin process exited

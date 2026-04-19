@@ -75,7 +75,7 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl tcpdump binutils logrotate iproute2 redis conntrack-tools keepalived ipvsadm",
+      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm redis curl tcpdump",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
     ]
@@ -202,6 +202,14 @@ build {
     source      = "../../../aeroscaler/target/release/attach-eni"
     destination = "/tmp/attach-eni"
   }
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/slot-pool-native"
+    destination = "/tmp/slot-pool-native"
+  }
+  provisioner "file" {
+    source      = "../../../aeroscaler/target/release/aeroscaler"
+    destination = "/tmp/aeroscaler"
+  }
 
   # Install and configure the interface management
   provisioner "shell" {
@@ -211,14 +219,20 @@ build {
       "sudo mv /tmp/assign-secondary-ip /usr/local/bin/assign-secondary-ip",
       "sudo mv /tmp/keepalived-config /usr/local/bin/keepalived-config",
       "sudo mv /tmp/attach-eni /usr/local/bin/attach-eni",
+      "sudo mv /tmp/slot-pool-native /usr/local/bin/slot-pool-native",
+      "sudo mv /tmp/aeroscaler /usr/local/bin/aeroscaler",
       "sudo chown root:root /usr/local/bin/aws-config",
       "sudo chown root:root /usr/local/bin/assign-secondary-ip",
       "sudo chown root:root /usr/local/bin/keepalived-config",
       "sudo chown root:root /usr/local/bin/attach-eni",
+      "sudo chown root:root /usr/local/bin/slot-pool-native",
+      "sudo chown root:root /usr/local/bin/aeroscaler",
       "sudo chmod +x /usr/local/bin/aws-config",
       "sudo chmod +x /usr/local/bin/assign-secondary-ip",
       "sudo chmod +x /usr/local/bin/keepalived-config",
       "sudo chmod +x /usr/local/bin/attach-eni",
+      "sudo chmod +x /usr/local/bin/slot-pool-native",
+      "sudo chmod +x /usr/local/bin/aeroscaler",
     ]
   }
 

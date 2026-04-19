@@ -25,8 +25,8 @@ export INTERVAL="30"
 
 # the global offset for the passive ftp port range and the number of ports
 # that each instance gets
-export FTP_PASSIVE_PORT_MIN="30000"
-export FTP_PASSIVE_PORT_COUNT="2000"
+export FTP_PASSIVE_PORT_MIN="20000"
+export FTP_PASSIVE_PORT_COUNT="1500"
 
 # Log file for heartbeat daemon stdout/stderr
 export LOGFILE="/var/log/slotmanager.log"

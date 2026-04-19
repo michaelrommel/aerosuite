@@ -12,8 +12,8 @@ description_stop="Stopping heartbeat daemon and releasing slot"
 : ${TTL_MS:="30000"}
 : ${INTERVAL:="10"}
 : ${LOGFILE:="/var/log/slotmanager.log"}
-: ${FTP_PASSIVE_PORT_MIN:="30000"}
-: ${FTP_PASSIVE_PORT_COUNT="2000"}
+: ${FTP_PASSIVE_PORT_MIN:="20000"}
+: ${FTP_PASSIVE_PORT_COUNT="1500"}
 
 # These are used by OpenRC's built-in status / stop logic
 pidfile="/var/run/slotmanager/heartbeat.pid"
@@ -111,7 +111,6 @@ set_passive_range() {
 	# set it for the ip stack
 	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf
 	grep -q "net.ipv4.ip_local_reserved_ports" /etc/sysctl.d/50-aeroftp.conf || echo "net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" >> /etc/sysctl.d/50-aeroftp.conf
-	sysctl -p /etc/sysctl.d/50-aeroftp.conf
 }
 
 attach_interface() {
@@ -171,6 +170,7 @@ start() {
 	slot=$(cat "${slot_file}")
 	set_passive_range $slot
 	attach_interface $slot
+	sysctl -p /etc/sysctl.d/50-aeroftp.conf
 
 	# ── launch the heartbeat daemon ──────────────────────────────────
 	# start-stop-daemon --background daemonises the process.
@@ -190,7 +190,8 @@ start() {
 				--slot "${slot}" \
 				--instance-id "${INSTANCE_ID}" \
 				--ttl-ms "${TTL_MS}" \
-				--interval "${INTERVAL}"
+				--interval "${INTERVAL}" \
+				--retry-attempts 10
 
 	eend $?
 }
