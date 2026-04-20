@@ -161,17 +161,17 @@ These steps are purely mechanical — no logic changes. Do them in order and
 verify `cargo build --workspace` after each.
 
 ```
-[ ] W0  Add aerosuite/Cargo.toml workspace root with all members listed
-[ ] W1  Create aerocore/ crate; move lib.rs content into it; fix imports in all existing bins
-[ ] W2  Rename aerostress/ → aerogym/; update package name in Cargo.toml; rename binary
-[ ] W3  Create aeroslot/ crate from slot-pool-native.rs; update openrc service name
-[ ] W4  Create aeroplug/ crate from assign-secondary-ip.rs + attach-eni.rs + manage-eni.rs;
+[x] W0  Add aerosuite/Cargo.toml workspace root with all members listed
+[x] W1  Create aerocore/ crate; move lib.rs content into it; fix imports in all existing bins
+[x] W2  Rename aerostress/ → aerogym/; update package name in Cargo.toml; rename binary
+[x] W3  Create aeroslot/ crate from slot-pool-native.rs; update openrc service name
+[x] W4  Create aeroplug/ crate from assign-secondary-ip.rs + attach-eni.rs + manage-eni.rs;
         consolidate into subcommands
-[ ] W5  Create aeropulse/ crate from keepalived-config.rs
-[ ] W6  Rename aeroscaler/ → aeroscale/; remove extracted bins; add aeroscale.rs skeleton
-[ ] W7  Absorb aeroscrape/ into aeroscale/; remove aeroscrape/ directory
-[ ] W8  Move aeroftp/images/ → aerobake/; update .pkr.hcl binary source paths
-[ ] W9  Verify full workspace build; update all openrc service files and documentation
+[x] W5  Create aeropulse/ crate from keepalived-config.rs
+[x] W6  Rename aeroscaler/ → aeroscale/; remove extracted bins; add aeroscale.rs skeleton
+[x] W7  Absorb aeroscrape/ into aeroscale/; remove aeroscrape/ directory
+[x] W8  Move aeroftp/images/ → aerobake/; update .pkr.hcl binary source paths
+[x] W9  Verify full workspace build; update all openrc service files and documentation
 ```
 
 ---
@@ -218,16 +218,18 @@ asg-change               pub/sub channel
   "-2147483648" → disabled (keepalived ignores this real server)
 ```
 
-### asg-change Message Schema (current — partial)
+### asg-change Message Schema
 
 ```json
 { "slot": 3, "action": "claim" }
-{ "slot": 3, "action": "release" }
+{ "slot": 3, "action": "release", "instance_id": "i-0abc1234567890def" }
 ```
 
-**TODO (aeroslot):** The `release` message must also carry `"instance_id"` so
-`autoscaler` can issue a `scale terminate` for the correct instance without an
-extra Redis lookup.
+The `instance_id` field on `release` messages was added in aeroslot (R4) so
+the listener can terminate the instance immediately without an extra Redis
+lookup.  The listener degrades gracefully if `instance_id` is absent (older
+aerolslot versions): a warning is logged and termination is deferred to the
+next P2 cleanup pass.
 
 ---
 
@@ -236,14 +238,15 @@ extra Redis lookup.
 These map directly onto the workspace restructuring steps. They are listed here
 for cross-reference:
 
-- [ ] **R1** — Extract ASG logic from `scale.rs` into `aerocore::asg`
+- [x] **R1** — Extract ASG logic from `scale.rs` into `aerocore::asg`
       (`describe`, `set_desired`, `terminate_instance`). Covered by **W1**.
-- [ ] **R2** — Extract `build_redis_client` and key constants from
+- [x] **R2** — Extract `build_redis_client` and key constants from
       `slot-pool-native.rs` into `aerocore::redis`. Covered by **W1** + **W3**.
-- [ ] **R3** — Decide slot→IP mapping strategy.
-      *Current assumption:* the weight filename encodes the IP, so we can
-      reverse-map slot→IP by scanning `/etc/keepalived/weights/`. Confirm or
-      add a `slot:ip:<n>` Redis key.
+- [x] **R3** — Slot→IP mapping resolved: `SlotNetwork::ip_for_slot(slot)` and
+      `SlotNetwork::slot_for_ip(ip)` use a deterministic arithmetic formula
+      (`base + offset + slot`) derived from the load balancer's eth1 subnet CIDR
+      (IMDS) and the `aeroftp-slot-offset` instance tag.  No weight-filename
+      scan and no `slot:ip:<n>` Redis key required.
 
 ---
 
@@ -373,7 +376,7 @@ Subscribe to `asg-change` on startup (separate tokio task).
 | `action` field | Behaviour |
 |---|---|
 | `"claim"` | Write `"0"` to the weight file for the backend IP of the claimed slot |
-| `"release"` | Write `"-2147483648"` to weight file, call `scale terminate <instance_id>` (requires `instance_id` in message — see TODO above) |
+| `"release"` | Write `"-2147483648"` to weight file; terminate instance via `instance_id` in message (degrades gracefully if absent — defers to next P2 cleanup pass) |
 
 After each message: trigger a full snapshot refresh.
 
@@ -394,7 +397,11 @@ Key metrics:
 #### 4.2 IPVS cross-check
 
 Active connection counts are already in the snapshot (§1.4). Compare against
-`ftp_sessions_total` as a sanity check; log discrepancies.
+`ftp_sessions_total` as a sanity check; warn only when the relative difference
+exceeds a configurable threshold (`--scrape-mismatch-pct`, default **5%**).
+This prevents noise from normal sampling jitter on lightly-loaded backends
+while surfacing real routing or session-counting anomalies.  The warning log
+includes the exact percentage so anomalies are quantified.
 
 #### 4.3 Aggregated metrics structure
 
@@ -423,19 +430,81 @@ Namespace: `AeroFTP/Autoscaler`
 
 ### Phase 5 — Autoscaling: Scale Decisions
 
-*(Algorithm to be designed — placeholder)*
+**Primary signal: IPVS `active_connections`** (the load balancer's real-time
+view), not per-backend Prometheus scrapes.  Scrape data is used only for the
+cross-check warning in Phase 4.2.  All scale decisions are master-only.
 
-Inputs: aggregated metrics snapshot from Phase 4.
+#### 5.1 Scale-up algorithm
 
-Candidate triggers:
-- **Scale up** when average `ftp_sessions_total` per active slot exceeds a
-  configurable high-water mark AND active slot count < configured max.
-- **Drain** when a slot's `ftp_sessions_total` is zero AND active slot count >
-  configured low-water mark.
+Each cycle, compute the **ceiling-average** active connections across all
+`Active` backends (live lease + IPVS data present):
 
-Scale up → `scale --desired <n+1>`.
-Drain → write `"-1"` to the backend's weight file; Phase 2 cleanup handles
-the rest once IPVS connections reach zero.
+```
+avg = ceil(total_connections / active_count)
+```
+
+When `avg > scale_up_threshold` for `hysteresis_cycles` consecutive cycles
+AND `desired < max` AND the scale-up cooldown has elapsed:
+
+```
+SetDesiredCapacity(desired + 1)
+```
+
+The hysteresis counter resets on any cycle where the average drops back below
+the threshold, or after a successful scale-up action.  If the AWS call fails
+the counter is preserved so the next cycle retries.
+
+**CLI flags:** `--scale-up-threshold` (default: **750**), `--hysteresis-cycles`
+(default: **3**), `--scale-up-cooldown-secs` (default: **120 s**).
+
+If `desired == max` the condition is logged as a warning and the counter is
+preserved; the action fires immediately if `max_size` is later raised.
+
+#### 5.2 Drain algorithm
+
+The backend with the **fewest** active connections is the drain *candidate*.
+Worst-case load on the busiest remaining backend after removal:
+
+```
+extra_per  = ceil(candidate_connections / (active_count − 1))
+worst_case = max_connections + extra_per
+```
+
+When `worst_case < drain_threshold` for `hysteresis_cycles` consecutive cycles
+AND `desired > min` AND the drain cooldown has elapsed:
+
+- Write `"-1"` (DRAINING) to the candidate's weight file.
+- keepalived stops routing new connections to that backend.
+- The **P2 cleanup pass** handles the rest: on a future cycle when IPVS
+  active connections reach zero it disables the backend (`-2147483648`) and
+  calls `TerminateInstanceInAutoScalingGroup`.
+
+**Candidate stability:** if the cheapest backend changes between cycles the
+hysteresis counter resets.  This prevents draining a backend that only briefly
+had the lowest count due to a transient spike on another.
+
+**CLI flags:** `--drain-threshold` (default: **500**), `--hysteresis-cycles`
+(default: **3**), `--drain-cooldown-secs` (default: **300 s**).
+
+#### 5.3 Desired-capacity decrement
+
+`TerminateInstanceInAutoScalingGroup` passes `ShouldDecrementDesiredCapacity`
+as a configurable flag (`--term-decrements-capacity`, default: **true**).
+Set to `false` during testing to let the ASG launch a replacement automatically.
+
+This flag is respected consistently everywhere an instance is terminated:
+the P2 cleanup pass, the `asg-change` listener, and the `scale terminate` CLI
+command (the CLI always uses `true` as it represents explicit operator intent).
+
+#### 5.4 Safety floors
+
+- Scale-up: never exceeds ASG `max_size`.
+- Drain: never initiates when `desired <= min_size`.
+- P2 cleanup: never terminates when `desired == min_size` (the ASG min-size
+  guard added in P2 prevents the 400 error from AWS).
+
+No separate "minimum active backends" floor is configured — the ASG `min_size`
+is the single authoritative constraint.
 
 ---
 
@@ -476,28 +545,30 @@ moving to the next.
 
 ```
 Workspace restructuring
-[ ] W0  Add aerosuite/Cargo.toml workspace root
-[ ] W1  Create aerocore/ — move lib.rs (aws/, asg/, redis/ modules)
-[ ] W2  Rename aerostress/ → aerogym/; rename package + binary
-[ ] W3  Create aeroslot/ from slot-pool-native.rs; rename openrc service
-[ ] W4  Create aeroplug/ — consolidate assign-secondary-ip, attach-eni, manage-eni
-[ ] W5  Create aeropulse/ from keepalived-config.rs
-[ ] W6  Rename aeroscaler/ → aeroscale/; strip extracted bins; add aeroscale.rs skeleton
-[ ] W7  Absorb aeroscrape/ into aeroscale/; delete aeroscrape/
-[ ] W8  Move aeroftp/images/ → aerobake/; update .pkr.hcl binary source paths
+[x] W0  Add aerosuite/Cargo.toml workspace root
+[x] W1  Create aerocore/ — move lib.rs (aws/, asg/, redis/ modules)
+[x] W2  Rename aerostress/ → aerogym/; rename package + binary
+[x] W3  Create aeroslot/ from slot-pool-native.rs; rename openrc service
+[x] W4  Create aeroplug/ — consolidate assign-secondary-ip, attach-eni, manage-eni
+[x] W5  Create aeropulse/ from keepalived-config.rs
+[x] W6  Rename aeroscaler/ → aeroscale/; strip extracted bins; add aeroscale.rs skeleton
+[x] W7  Absorb aeroscrape/ into aeroscale/; delete aeroscrape/
+[x] W8  Move aeroftp/images/ → aerobake/; update .pkr.hcl binary source paths
 
 autoscaler implementation
-[ ] P1  SystemSnapshot — read weight files, Redis leases, ASG, /proc/net/ip_vs (read-only)
-[ ] P1  Print snapshot table on startup (first working aeroscale binary)
-[ ] P2  Cleanup actions with --dry-run flag
-[ ] P3  asg-change Redis subscriber
-[ ] P4  Prometheus scrape + slot-labelled aggregation
-[ ] P4  Expose /metrics HTTP endpoint
-[ ] P4  Push to CloudWatch (slot-labelled)
-[ ] P5  Design and implement scale-up / drain algorithm
+[x] P1  SystemSnapshot — read weight files, Redis leases, ASG, /proc/net/ip_vs (read-only)
+[x] P1  Print snapshot table on startup (first working aeroscale binary)
+[x] P2  Cleanup actions with --dry-run flag
+[x] P3  asg-change Redis subscriber
+[x] P4  Prometheus scrape + slot-labelled aggregation
+[x] P4  Expose /metrics HTTP endpoint
+[x] P4  Push to CloudWatch (slot-labelled)
+[x] P5  Design and implement scale-up / drain algorithm
 
 Outstanding decisions
-[ ] R3  Confirm slot→IP mapping strategy (weight filename scan vs Redis key)
-[ ] R4  Confirm slot-pool-native TODO: add instance_id to release message in aeroslot
-[ ] R5  Decide whether aws-config binary stays in aeroscale or moves to aerocore
+[x] R3  Slot→IP mapping: resolved with SlotNetwork deterministic formula
+        (subnet CIDR via IMDS + aeroftp-slot-offset tag).  No Redis key needed.
+[x] R4  instance_id in release message: implemented in aeroslot; listener and
+        cleanup both consume it for immediate termination.
+[x] R5  aws-config binary: stays in aeroscale/src/bin/aws-config.rs.
 ```

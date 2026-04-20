@@ -6,6 +6,7 @@ pub use aerocore::*;
 pub mod cleanup;
 pub mod listener;
 pub mod metrics;
+pub mod scaler;
 pub mod slot_network;
 pub mod snapshot;
 pub mod vrrp;

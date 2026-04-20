@@ -79,13 +79,19 @@ pub async fn set_desired(
     }
 }
 
-/// Call `TerminateInstanceInAutoScalingGroup` and decrement desired capacity.
+/// Call `TerminateInstanceInAutoScalingGroup`.
+///
+/// When `decrement` is `true` the ASG desired capacity is decremented by 1
+/// automatically.  Pass `false` only in testing scenarios where you want the
+/// ASG to immediately launch a replacement.
 pub async fn terminate_instance(
     region: &str,
     instance_id: &str,
     creds: &AwsCredentials,
+    decrement: bool,
 ) -> Result<()> {
     let host = format!("autoscaling.{region}.amazonaws.com");
+    let decrement_str = if decrement { "true" } else { "false" };
     let xml = aws_query(
         &host,
         "autoscaling",
@@ -95,7 +101,7 @@ pub async fn terminate_instance(
             ("Action", "TerminateInstanceInAutoScalingGroup"),
             ("Version", "2011-01-01"),
             ("InstanceId", instance_id),
-            ("ShouldDecrementDesiredCapacity", "false"),
+            ("ShouldDecrementDesiredCapacity", decrement_str),
         ],
     )
     .await?;
