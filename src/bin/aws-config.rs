@@ -7,7 +7,7 @@
 //! script) so that other services can source the file without hitting IMDS
 //! themselves.
 
-use aeroscaler::{fetch_imds_path, fetch_imds_token};
+use aerocore::{fetch_imds_path, fetch_imds_token};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::{fs, path::PathBuf};
@@ -17,7 +17,7 @@ use std::{fs, path::PathBuf};
 #[command(about = "Dump EC2 instance metadata to a VAR=VALUE config file")]
 struct Args {
     /// Destination file (created if absent, overwritten if present)
-    #[arg(long, default_value = "/var/run/slotmanager/aws.conf")]
+    #[arg(long, default_value = "/var/run/aeroslot/aws.conf")]
     out: PathBuf,
 }
 
@@ -28,9 +28,9 @@ async fn main() -> Result<()> {
     // One token, three metadata lookups
     let token = fetch_imds_token().await?;
 
-    let instance_id   = fetch_imds_path(&token, "instance-id").await?;
-    let public_ipv4   = fetch_imds_path(&token, "public-ipv4").await?;
-    let private_ipv4  = fetch_imds_path(&token, "local-ipv4").await?;
+    let instance_id = fetch_imds_path(&token, "instance-id").await?;
+    let public_ipv4 = fetch_imds_path(&token, "public-ipv4").await?;
+    let private_ipv4 = fetch_imds_path(&token, "local-ipv4").await?;
 
     let content = format!(
         "INSTANCE_ID={instance_id}\nPUBLIC_IPV4={public_ipv4}\nPRIVATE_IPV4={private_ipv4}\n"
@@ -44,8 +44,8 @@ async fn main() -> Result<()> {
     fs::write(&args.out, &content)
         .with_context(|| format!("Cannot write {}", args.out.display()))?;
 
-    println!("Wrote {}:", args.out.display());
-    print!("{content}");
+    // println!("Wrote {}:", args.out.display());
+    // print!("{content}");
 
     Ok(())
 }
