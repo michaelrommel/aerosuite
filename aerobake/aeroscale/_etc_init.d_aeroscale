@@ -12,7 +12,7 @@ description="AeroFTP aeroscale — backend management and autoscaling daemon"
 : ${SCRAPE_PORT:="9090"}
 : ${CLOUDWATCH_NAMESPACE:="AeroFTP/Autoscaler"}
 : ${SNAPSHOT_INTERVAL:="30"}
-: ${VIP_INSIDE:="172.16.32.10"}
+: ${VIP_INSIDE:=""}   # leave empty to use IMDS tag aeroftp-vip-inside
 : ${WEIGHT_STATE_TTL:="3600"}
 : ${SCALE_UP_THRESHOLD:="750"}
 : ${DRAIN_THRESHOLD:="500"}
@@ -61,7 +61,7 @@ start() {
 			--scrape-port          "${SCRAPE_PORT}"  \
 			--cloudwatch-namespace "${CLOUDWATCH_NAMESPACE}" \
 			--snapshot-interval    "${SNAPSHOT_INTERVAL}"   \
-			--vip-inside           "${VIP_INSIDE}"          \
+			${VIP_INSIDE:+--vip-inside "${VIP_INSIDE}"}     \
 			--weight-state-ttl     "${WEIGHT_STATE_TTL}"    \
 			--scale-up-threshold   "${SCALE_UP_THRESHOLD}"  \
 			--drain-threshold      "${DRAIN_THRESHOLD}"     \

@@ -25,7 +25,7 @@ use aeroscale::{
     vrrp,
     weight_sync,
 };
-use aerocore::{fetch_imds_credentials, redis_pool::build_redis_client};
+use aerocore::{fetch_imds_credentials, fetch_imds_path, fetch_imds_token, redis_pool::build_redis_client};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -185,10 +185,37 @@ async fn main() -> Result<()> {
     if args.dry_run {
         info!("DRY-RUN mode — no writes will be performed");
     }
-    if args.vip_inside.is_none() {
-        warn!("--vip-inside not set; always assuming MASTER role. \
-               Set it for correct two-node behaviour.");
-    }
+
+    // ── Resolve vip_inside ─────────────────────────────────────────────────────────
+    // Priority: CLI flag → IMDS tag aeroftp-vip-inside → None (assume master).
+    let vip_inside: Option<Ipv4Addr> = match args.vip_inside {
+        Some(vip) => {
+            info!(%vip, "vip-inside: using CLI value");
+            Some(vip)
+        }
+        None => {
+            let resolved = async {
+                let token = fetch_imds_token().await?;
+                let s = fetch_imds_path(&token, "tags/instance/aeroftp-vip-inside").await?;
+                s.trim().parse::<Ipv4Addr>().map_err(|e| anyhow::anyhow!("invalid IP in aeroftp-vip-inside tag: {e}"))
+            }.await;
+            match resolved {
+                Ok(vip) => {
+                    info!(%vip, "vip-inside: resolved from IMDS tag aeroftp-vip-inside");
+                    Some(vip)
+                }
+                Err(e) => {
+                    warn!(
+                        "--vip-inside not set and aeroftp-vip-inside IMDS tag not found \
+                         ({e:#}); always assuming MASTER role. \
+                         Add the tag to the load balancer launch template for correct \
+                         two-node behaviour."
+                    );
+                    None
+                }
+            }
+        }
+    };
 
     // ── One-time setup ────────────────────────────────────────────────────────
 
@@ -288,7 +315,7 @@ async fn main() -> Result<()> {
 
     loop {
         // Determine role each cycle — handles failover transparently.
-        let is_master = match args.vip_inside {
+        let is_master = match vip_inside {
             Some(vip) => vrrp::is_master(vip).await,
             None      => true,
         };

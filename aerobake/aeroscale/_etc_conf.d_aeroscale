@@ -46,7 +46,11 @@ export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.eu-west-
 #   Master: full operation (cleanup, termination, CloudWatch, weight persist)
 #   Backup: weight sync from Redis, metrics scrape only (no CloudWatch)
 # Must match vip_inside configured in aeropulse / keepalived.conf.
-: ${VIP_INSIDE:="172.16.32.10"}
+# aeroscale reads the inside VIP preferentially from the IMDS instance tag
+# aeroftp-vip-inside (set once in the EC2 launch template, propagates to all
+# nodes automatically).  This variable is an optional CLI override for
+# environments where the IMDS tag is not yet deployed.
+: ${VIP_INSIDE:=""}
 
 # ── Weight state persistence ─────────────────────────────────────────────────
 # Maximum age (seconds) of Redis weight state before it is considered stale
