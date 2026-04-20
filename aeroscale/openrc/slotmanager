@@ -1,0 +1,153 @@
+#!/sbin/openrc-run
+
+description="Claims a Redis slot from the pool and keeps it alive via heartbeat"
+description_start="Claiming slot and starting heartbeat daemon"
+description_stop="Stopping heartbeat daemon and releasing slot"
+
+# Load defaults, then allow /etc/conf.d/slotmanager to override them
+: ${AWS_CONFIG_BINARY:="/usr/local/bin/aws-config"}
+: ${SLOT_POOL_BINARY:="/usr/local/bin/slot-pool-native"}
+: ${REDIS_URL:="redis://127.0.0.1:6379"}
+: ${TTL_MS:="30000"}
+: ${INTERVAL:="10"}
+: ${LOGFILE:="/var/log/slotmanager.log"}
+
+# These are used by OpenRC's built-in status / stop logic
+pidfile="/var/run/slotmanager/heartbeat.pid"
+conf_file="/var/run/slotmanager/aws.conf"
+slot_file="/var/run/slotmanager/slot"
+run_dir="/var/run/slotmanager"
+
+depend() {
+    # Hard dependency: networking must be up to reach Redis
+    need net
+
+    # Soft dependency: if a local 'redis' service exists, start after it —
+    # but do not fail if it is absent (Redis may be remote).
+    use redis
+
+    # Services that must start *after* slotmanager has a slot can declare:
+    #   depend() { need slotmanager; }
+    # in their own init script.
+    before ftpbackend
+}
+
+start_pre() {
+    # Ensure the runtime directory exists with correct permissions
+    checkpath --directory --owner root:root --mode 0750 "${run_dir}"
+}
+
+start() {
+    ebegin "Starting slotmanager"
+
+    # ── Step 1: get instance info from AWS ───────────────────────────────────
+    einfo "Fetching instance info from AWS ..."
+
+    local info_out
+    info_out= "${AWS_CONFIG_BINARY}"
+    local info_rc=$?
+
+    if [ ${info_rc} -ne 0 ]; then
+        eerror "Getting instance info failed (exit ${info_rc}):"
+        eerror "${info_out}"
+        eend 1
+        return 1
+    fi
+
+	. ${conf_file} 
+
+    # ── Step 2: claim a slot ─────────────────────────────────────────────────
+    einfo "Claiming slot from pool (instance-id: ${INSTANCE_ID}) ..."
+
+    local claim_out
+    claim_out=$(REDIS_URL="${REDIS_URL}" \
+        "${SLOT_POOL_BINARY}" claim \
+            --instance-id "${INSTANCE_ID}" \
+            --ttl-ms      "${TTL_MS}" 2>&1)
+    local claim_rc=$?
+
+    if [ ${claim_rc} -ne 0 ]; then
+        eerror "Slot claim failed (exit ${claim_rc}):"
+        eerror "${claim_out}"
+        eend 1
+        return 1
+    fi
+
+    # slot-pool-native prints the bare slot number alone on the last line
+    # so shell callers can capture it cleanly with tail -1.
+    local slot
+    slot=$(printf '%s' "${claim_out}" | tail -1)
+
+    # Sanity-check: must be a plain integer
+    if ! printf '%s' "${slot}" | grep -qE '^[0-9]+$'; then
+        eerror "Could not parse slot number from claim output:"
+        eerror "${claim_out}"
+        eend 1
+        return 1
+    fi
+
+    einfo "Claimed slot ${slot}"
+
+    # Persist the slot number so stop() and external scripts can read it
+    printf '%s\n' "${slot}" > "${slot_file}" || {
+        eerror "Cannot write slot file ${slot_file}"
+        eend 1
+        return 1
+    }
+
+    # ── Step 3: launch the heartbeat daemon ──────────────────────────────────
+    # start-stop-daemon --background daemonises the process.
+    # --make-pidfile writes the PID so OpenRC can track and stop it.
+    # SIGTERM (sent by --stop below) is caught by the heartbeat command's
+    # signal handler, which exits cleanly.
+    start-stop-daemon --start          \
+        --background                   \
+        --make-pidfile                 \
+        --pidfile  "${pidfile}"        \
+        --stdout   "${LOGFILE}"        \
+        --stderr   "${LOGFILE}"        \
+        --env      "REDIS_URL=${REDIS_URL}" \
+        --exec     "${SLOT_POOL_BINARY}"    \
+        --                             \
+            heartbeat                  \
+                --slot        "${slot}"        \
+                --instance-id "${INSTANCE_ID}" \
+                --ttl-ms      "${TTL_MS}"      \
+                --interval    "${INTERVAL}"
+
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping slotmanager"
+
+    # ── Step 1: stop the heartbeat daemon ────────────────────────────────────
+    # Send SIGTERM; the heartbeat loop catches it and exits cleanly.
+    # Fall back to SIGKILL after 10 s if it has not exited.
+    start-stop-daemon --stop    \
+        --pidfile "${pidfile}"  \
+        --retry   "TERM/10/KILL/5"
+    local daemon_rc=$?
+
+    # ── Step 2: release the slot back to the pool ────────────────────────────
+    # Best-effort: a Redis outage must not block system shutdown.
+    # If this fails the lease will expire on its own after TTL_MS milliseconds.
+    if [ -f "${slot_file}" ]; then
+        local slot
+        slot=$(cat "${slot_file}")
+
+        if printf '%s' "${slot}" | grep -qE '^[0-9]+$'; then
+            einfo "Releasing slot ${slot} ..."
+            REDIS_URL="${REDIS_URL}" \
+                "${SLOT_POOL_BINARY}" release \
+                    --slot        "${slot}"        \
+                    --instance-id "${INSTANCE_ID}" \
+                || ewarn "Slot release failed — slot ${slot} will expire after TTL (${TTL_MS} ms)"
+        fi
+
+        rm -f "${slot_file}"
+    fi
+
+    # Report success/failure based on the daemon stop, not the release step
+    eend ${daemon_rc}
+}
