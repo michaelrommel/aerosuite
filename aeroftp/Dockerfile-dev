@@ -1,0 +1,14 @@
+FROM rust:alpine AS builder
+WORKDIR /workspace/aeroftp
+COPY <<-EOT /workspace/aeroftp/credentials.json
+[
+	{ "username": "test", "password": "secret" }
+]
+EOT
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
+RUN apk add libcap-setcap
+#RUN setcap CAP_NET_BIND_SERVICE=+eip /workspace/aeroftp/target/release/aeroftp
+RUN adduser -D aeroftp
+USER aeroftp
+CMD [ "sleep infinity" ]
+
