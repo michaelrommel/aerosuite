@@ -120,14 +120,11 @@ struct Args {
     #[arg(long, default_value = "/etc/keepalived/chk-forward-path.sh")]
     chk_forward_out: PathBuf,
 
-    // ── Virtual IP addresses ──────────────────────────────────────────────────
-    /// Outside (public-facing) virtual IP address
-    #[arg(long, default_value = "172.16.29.100")]
-    vip_outside: String,
+    /// Path for the generated backends include file
+    /// (track_file blocks + virtual_server block, included by keepalived.conf)
+    #[arg(long, default_value = "/etc/keepalived/backends.conf")]
+    backends_out: PathBuf,
 
-    /// Inside (server-facing) virtual IP address
-    #[arg(long, default_value = "172.16.32.10")]
-    vip_inside: String,
 
     // ── Interface names ───────────────────────────────────────────────────────
     /// OS interface name for the outside ENI (device index 0)
@@ -237,6 +234,18 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     track_rise: u32,
 
+    // ── Virtual server tuning ──────────────────────────────────────────────────
+    /// IPVS scheduler for the virtual_server block
+    #[arg(long, default_value = "wlc")]
+    lvs_sched: String,
+
+    /// persistence_timeout for the virtual_server block (seconds).
+    /// Covers the window from control-connection establishment until
+    /// ip_vs_ftp has processed the PASV response and created a data-channel
+    /// IPVS entry for that session.
+    #[arg(long, default_value_t = 30u32)]
+    persistence_timeout: u32,
+
     // ── Notify script helpers ─────────────────────────────────────────────────
     /// Absolute path to the aeroplug binary (embedded in the
     /// generated notify-master.sh)
@@ -267,6 +276,14 @@ struct InstanceData {
     inside: IfaceInfo,
     /// Peer's fixed eth1 IP, read from the keepalived-peer-inside IMDS tag.
     peer_inside_ip: String,
+    /// Outside VIP — from required IMDS tag `aeroftp-vip-outside`.
+    vip_outside: String,
+    /// Inside VIP — from required IMDS tag `aeroftp-vip-inside`.
+    vip_inside: String,
+    /// Slot → IP mapping derived from eth1 subnet CIDR + aeroftp-slot-offset tag.
+    slot_network: aerocore::SlotNetwork,
+    /// Total number of backend slots, from IMDS tag `aeroftp-slot-count`.
+    slot_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,57 +334,53 @@ async fn main() -> Result<()> {
     println!("  Resolving instance data from IMDS and EC2 API …");
     let data = resolve_instance_data().await?;
 
-    println!("  Instance : {}", data.instance_id);
-    println!("  Role     : {}", data.role.as_str());
-    println!(
-        "  eth0     : {}  ({})",
-        data.outside.primary_ip, data.outside.eni_id
-    );
-    println!(
-        "  eth1     : {}  ({})",
-        data.inside.primary_ip, data.inside.eni_id
-    );
-    println!("  Peer eth1: {} (inside unicast peer)", data.peer_inside_ip);
+    println!("  Instance  : {}", data.instance_id);
+    println!("  Role      : {}", data.role.as_str());
+    println!("  eth0      : {}  ({})", data.outside.primary_ip, data.outside.eni_id);
+    println!("  eth1      : {}  ({})", data.inside.primary_ip, data.inside.eni_id);
+    println!("  Peer eth1 : {} (inside unicast peer)", data.peer_inside_ip);
+    println!("  VIP out   : {} (aeroftp-vip-outside)", data.vip_outside);
+    println!("  VIP in    : {} (aeroftp-vip-inside)", data.vip_inside);
+    println!("  Slots     : {} × ({} – {})",
+        data.slot_count,
+        data.slot_network.ip_for_slot(0),
+        data.slot_network.ip_for_slot(data.slot_count - 1));
 
     // Render all content.
-    let vrrp_conf = render_vrrp_conf(&args, &data);
-    let notify_master = render_notify_master(&args, &data);
-    let notify_backup = render_notify_backup();
-    let chk_backends = render_chk_backends(&args);
+    let vrrp_conf        = render_vrrp_conf(&args, &data);
+    let backends_conf    = render_backends_conf(&args, &data);
+    let notify_master    = render_notify_master(&args, &data);
+    let notify_backup    = render_notify_backup();
+    let chk_backends     = render_chk_backends(&args);
     let chk_forward_path = render_chk_forward_path(&args, &data);
 
     // Write files.
-    write_file(&args.out, &vrrp_conf, 0o640)?;
-    write_file(&args.notify_master_out, &notify_master, 0o750)?;
-    write_file(&args.notify_backup_out, &notify_backup, 0o750)?;
-    write_file(&args.chk_backends_out, &chk_backends, 0o750)?;
-    write_file(&args.chk_forward_out, &chk_forward_path, 0o750)?;
+    write_file(&args.out,              &vrrp_conf,        0o640)?;
+    write_file(&args.backends_out,     &backends_conf,    0o640)?;
+    write_file(&args.notify_master_out, &notify_master,   0o750)?;
+    write_file(&args.notify_backup_out, &notify_backup,   0o750)?;
+    write_file(&args.chk_backends_out, &chk_backends,     0o750)?;
+    write_file(&args.chk_forward_out,  &chk_forward_path, 0o750)?;
 
     println!("✅ Written:");
     println!("   {}", args.out.display());
+    println!("   {}", args.backends_out.display());
     println!("   {}", args.notify_master_out.display());
     println!("   {}", args.notify_backup_out.display());
     println!(
         "   {}  [track: {}]",
         args.chk_backends_out.display(),
-        if args.enable_track_backends {
-            "ENABLED"
-        } else {
-            "generated, not yet active"
-        }
+        if args.enable_track_backends { "ENABLED" } else { "generated, not yet active" }
     );
     println!(
         "   {}  [track: {}]",
         args.chk_forward_out.display(),
-        if args.enable_track_forward {
-            "ENABLED"
-        } else {
-            "generated, not yet active"
-        }
+        if args.enable_track_forward { "ENABLED" } else { "generated, not yet active" }
     );
     println!();
-    println!("   Ensure your keepalived.conf contains:");
+    println!("   keepalived.conf must include:");
     println!("     include \"{}\"", args.out.display());
+    println!("     include \"{}\"", args.backends_out.display());
 
     Ok(())
 }
@@ -406,12 +419,52 @@ async fn resolve_instance_data() -> Result<InstanceData> {
     // Peer inside IP is fixed and stored as an instance tag — no API discovery needed.
     let peer_inside_ip = fetch_imds_tag(&token, "keepalived-peer-inside").await?;
 
+    // ── VIPs: required IMDS instance tags ───────────────────────────────────
+    // Set once in the EC2 launch template with "Resource types: Instances".
+    // Both master and backup nodes read them from the same source of truth.
+    let vip_outside = fetch_imds_tag(&token, "aeroftp-vip-outside")
+        .await
+        .context(
+            "IMDS tag 'aeroftp-vip-outside' not found. \
+             Add it to the EC2 launch template (e.g. value: 172.16.29.100)."
+        )?;
+
+    let vip_inside = fetch_imds_tag(&token, "aeroftp-vip-inside")
+        .await
+        .context(
+            "IMDS tag 'aeroftp-vip-inside' not found. \
+             Add it to the EC2 launch template (e.g. value: 172.16.32.10)."
+        )?;
+
+    // ── Slot network (shared formula with aeroscale) ───────────────────────────
+    let slot_network = aerocore::SlotNetwork::from_imds()
+        .await
+        .context(
+            "Failed to resolve slot network from IMDS. \
+             Ensure the aeroftp-slot-offset tag and eth1 subnet CIDR are available."
+        )?;
+
+    let slot_count_str = fetch_imds_tag(&token, "aeroftp-slot-count")
+        .await
+        .context(
+            "IMDS tag 'aeroftp-slot-count' not found. \
+             Add it to the load balancer launch template (e.g. value: 20)."
+        )?;
+    let slot_count: u32 = slot_count_str
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid aeroftp-slot-count value: '{slot_count_str}'"))?;
+
     Ok(InstanceData {
         instance_id,
         role,
         outside,
         inside,
         peer_inside_ip,
+        vip_outside,
+        vip_inside,
+        slot_network,
+        slot_count,
     })
 }
 async fn fetch_imds_tag(token: &str, tag_key: &str) -> Result<String> {
@@ -470,6 +523,106 @@ async fn fetch_all_interfaces(token: &str) -> Result<Vec<IfaceInfo>> {
         });
     }
     Ok(interfaces)
+}
+
+
+// ── backends.conf rendering ───────────────────────────────────────────────────
+
+/// Generate `/etc/keepalived/backends.conf` — included by the static
+/// `keepalived.conf`.  Contains:
+///
+/// 1. One `track_file` block per slot — keepalived reads the weight file
+///    directly to determine whether the backend is active, draining or removed.
+///
+/// 2. One `virtual_server` block with one `real_server` per slot referencing
+///    the corresponding `track_file`.
+///
+/// The slot IPs are computed deterministically via `SlotNetwork`:
+///   `IP = base + offset + slot`
+///
+/// This file is regenerated at every boot so changes to `aeroftp-slot-count`
+/// or the slot subnet are picked up without manual edits.
+fn render_backends_conf(args: &Args, data: &InstanceData) -> String {
+    let ts        = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let slot_0    = data.slot_network.ip_for_slot(0);
+    let slot_last = data.slot_network.ip_for_slot(data.slot_count - 1);
+
+    // ── track_file blocks ─────────────────────────────────────────────────────
+    let mut track_files = String::new();
+    for slot in 0..data.slot_count {
+        let ip = data.slot_network.ip_for_slot(slot);
+        track_files.push_str(&format!(
+            "track_file backend_{ip} {{\n    file \"/etc/keepalived/weights/backend-{ip}.weight\"\n}}\n"
+        ));
+    }
+
+    // ── real_server blocks ────────────────────────────────────────────────────
+    let mut real_servers = String::new();
+    for slot in 0..data.slot_count {
+        let ip = data.slot_network.ip_for_slot(slot);
+        real_servers.push_str(&format!(
+            "    real_server {ip} 21 {{\n        weight 1\n        FILE_CHECK {{\n            track_file backend_{ip}\n            weight 1\n        }}\n    }}\n"
+        ));
+    }
+
+    format!(
+        r#"# backends.conf — generated by aeropulse for {instance_id}
+# Generated : {ts}
+# DO NOT EDIT MANUALLY — re-run aeropulse to regenerate.
+#
+# Slot network:
+#   base      : {base}
+#   offset    : {offset}
+#   count     : {count}
+#   range     : {slot_0} – {slot_last}
+#
+# Weight file values:
+#    0           → active   (effective weight 1, receives new connections)
+#   -1           → draining (effective weight 0, no new connections)
+#   -2147483648  → removed  (FAULT state, fully absent from IPVS scheduler)
+#
+# These files are managed by aeroscale; do not edit manually.
+
+# ---------------------------------------------------------------------------
+# One track_file per backend slot.
+# ---------------------------------------------------------------------------
+
+{track_files}
+# ---------------------------------------------------------------------------
+# Virtual server  (outside VIP → backend pool on FTP port 21)
+#
+# FTP requires NAT mode so that ip_vs_ftp can rewrite PASV responses and
+# automatically track data-channel connections.  DR mode is not supported.
+#
+# persistence_timeout only needs to cover the window from control-connection
+# establishment to ip_vs_ftp processing the PASV response.  Once ip_vs_ftp
+# has created the data-channel IPVS entry the session no longer depends on
+# persistence.  Since each control connection carries exactly one file upload
+# there is no need to cover multiple transfers per control connection.
+# ---------------------------------------------------------------------------
+
+virtual_server {vip_outside} 21 {{
+    lvs_sched    {sched}
+    lvs_method   NAT
+    protocol     TCP
+    persistence_timeout {timeout}
+    quorum       1
+
+{real_servers}}}
+"#,
+        instance_id  = data.instance_id,
+        ts           = ts,
+        base         = data.slot_network.base,
+        offset       = data.slot_network.offset,
+        count        = data.slot_count,
+        slot_0       = slot_0,
+        slot_last    = slot_last,
+        track_files  = track_files,
+        vip_outside  = data.vip_outside,
+        sched        = args.lvs_sched,
+        timeout      = args.persistence_timeout,
+        real_servers = real_servers,
+    )
 }
 
 // ── vrrp.conf rendering ───────────────────────────────────────────────────────
@@ -584,8 +737,8 @@ vrrp_instance VI_INSIDE {{
         out = args.out.display(),
         notify_master = args.notify_master_out.display(),
         notify_backup = args.notify_backup_out.display(),
-        vip_outside = args.vip_outside,
-        vip_inside = args.vip_inside,
+        vip_outside = data.vip_outside,
+        vip_inside = data.vip_inside,
         iface_outside = args.iface_outside,
         iface_inside = args.iface_inside,
         vrid_outside = args.vrid_outside,
@@ -776,8 +929,8 @@ log "Both VIPs claimed successfully."
         instance_id = data.instance_id,
         ts = ts,
         assign = args.assign_bin.display(),
-        vip_outside = args.vip_outside,
-        vip_inside = args.vip_inside,
+        vip_outside = data.vip_outside,
+        vip_inside = data.vip_inside,
         eni_inside = data.inside.eni_id,
         region = args.region,
     )
