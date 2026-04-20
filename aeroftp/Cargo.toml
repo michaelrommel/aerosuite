@@ -44,12 +44,6 @@ aws-credential-types = "1.2.11"
 # aws-runtime = "1.6.0"
 # aws-smithy-runtime-api = { version = "1.11.3", features = ["client"] }
 
-[profile.release]
-strip = true      # Automatically strip symbols
-lto = true        # Link-time optimization
-opt-level = "s"   # Optimize for size
-codegen-units = 1 # Better optimization at the cost of compile time
-
 [lints.rust]
 missing_docs = "warn"
 
