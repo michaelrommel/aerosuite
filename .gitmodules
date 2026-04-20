@@ -1,0 +1,6 @@
+[submodule "libunftp"]
+	path = libunftp
+	url = git@github.com:michaelrommel/libunftp.git
+[submodule "unftp-sbe-opendal"]
+	path = unftp-sbe-opendal
+	url = git@github.com:michaelrommel/unftp-sbe-opendal.git
