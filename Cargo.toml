@@ -2,18 +2,16 @@
 resolver = "2"
 members = [
     "aerocore",
+    "aeroftp",
     "aerogym",
     "aeroplug",
     "aeropulse",
     "aeroscale",
     "aeroslot",
 ]
-# Crates that are NOT workspace members — either untouched (libunftp stack)
-# or not yet converted.  aeroscrape will be absorbed into aeroscale in W7.
+# Crates that are NOT workspace members — untouched git submodules that
+# aeroftp depends on via path.
 exclude = [
-    "aeroftp",
-    "aeroscrape",
-    "aerostress.new",
     "libunftp",
     "unftp-sbe-opendal",
 ]
@@ -42,7 +40,7 @@ prometheus-parse    = "0.2"
 axum                = "0.7"
 
 # ── Release profile ───────────────────────────────────────────────────────────
-# Applies to all workspace members.
+# Default: optimise all daemon/CLI crates for speed.
 
 [profile.release]
 opt-level      = 3
@@ -50,3 +48,11 @@ lto            = "fat"
 codegen-units  = 1
 panic          = "abort"
 strip          = true
+
+# aeroftp is a long-running server binary where image/deploy size matters
+# more than raw CPU throughput.  Override back to the size-optimised
+# settings it used before joining the workspace.
+[profile.release.package.aeroftp]
+# Optimise for binary size rather than speed (lto/panic/strip are
+# inherited from the workspace [profile.release] above).
+opt-level = "s"

@@ -40,8 +40,8 @@ aerosuite/
   aerobake/                 ← moved from aeroftp/images/ — Packer AMI image definitions
     backend/                   AMI for FTP backend instances
     loadbalancer/              AMI for keepalived load balancer instances
-  libunftp/                 ← untouched
-  unftp-sbe-opendal/        ← untouched
+  libunftp/                 ← git submodule (untouched) — aeroftp path dependency
+  unftp-sbe-opendal/        ← git submodule (untouched) — aeroftp path dependency
   libunftp_metadata.patch   ← untouched
 ```
 
@@ -128,6 +128,8 @@ The following table shows what each crate produces:
 
 ### 0.6 Workspace `Cargo.toml` Skeleton
 
+The final workspace root after all restructuring is complete:
+
 ```toml
 [workspace]
 resolver = "2"
@@ -135,25 +137,21 @@ members = [
     "aerocore",
     "aeroftp",
     "aerogym",
-    "aeroscale",
-    "aeroslot",
     "aeroplug",
     "aeropulse",
+    "aeroscale",
+    "aeroslot",
 ]
-
-[workspace.dependencies]
-# Pin shared dependency versions here so all crates stay in sync
-anyhow      = "1"
-tokio       = { version = "1", features = ["full"] }
-clap        = { version = "4", features = ["derive", "env"] }
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-redis       = { version = "1.2", features = ["tls-rustls", "tokio-rustls-comp", "tls-rustls-insecure"] }
-reqwest     = { version = "0.13", features = ["json"] }
-chrono      = "0.4"
-tracing     = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+exclude = [
+    "libunftp",           # git submodule — aeroftp path dependency
+    "unftp-sbe-opendal",  # git submodule — aeroftp path dependency
+]
 ```
+
+The `[workspace.dependencies]` table pins shared dependency versions so all
+crates stay in sync.  Individual crate `Cargo.toml` files opt in with
+`dep = { workspace = true }`.  See the workspace root `Cargo.toml` for the
+current pinned versions.
 
 ### 0.7 Restructuring Step Checklist
 
@@ -419,12 +417,41 @@ Serve `/metrics` on a configurable port (default: `9091`) via `axum`.
 
 #### 4.5 Push to AWS CloudWatch
 
-Adapt `metrics_cloudwatch_embedded` from the absorbed `aeroscrape` codebase.
+Adapted from the absorbed `aeroscrape` codebase via our own `aws_query` /
+SigV4 infrastructure — no CloudWatch agent or EMF capture needed.
 
 **Critical fix vs aeroscrape:** dimensions use slot numbers, never instance IDs.
 This prevents unbounded metric registry growth as instances are replaced.
 
 Namespace: `AeroFTP/Autoscaler`
+
+Metrics pushed per slot.  Any metric absent from the scrape (e.g. a freshly
+started backend with no transfers yet) is silently pushed as `0.0`.
+
+| CloudWatch name        | Dimensions    | Source Prometheus metric                                    | Unit  |
+|------------------------|---------------|-------------------------------------------------------------|-------|
+| `ActiveSessions`       | Slot          | `ftp_sessions_total`                         (gauge)        | Count |
+| `CumulativeSessions`   | Slot          | `ftp_sessions_count`                         (counter)      | Count |
+| `BackendWriteBytes`    | Slot          | `ftp_backend_write_bytes`                    (counter)      | Bytes |
+| `BackendWriteFiles`    | Slot          | `ftp_backend_write_files`                    (counter)      | Count |
+| `ReceivedBytes`        | Slot          | `ftp_received_bytes{command="stor"}`         (counter)      | Bytes |
+| `StorTransfers`        | Slot + Status | `ftp_transferred_total{command="stor"}` — one row per status value | Count |
+| `PassiveModeCommands`  | Slot          | sum of `ftp_command_total` for `epsv` + `pasv` (counter)   | Count |
+| `StorCommands`         | Slot          | `ftp_command_total{command="stor"}`          (counter)      | Count |
+| `ResidentMemoryBytes`  | Slot          | `process_resident_memory_bytes`              (gauge)        | Bytes |
+| `OpenFileDescriptors`  | Slot          | `process_open_fds`                           (gauge)        | Count |
+| `MaxFileDescriptors`   | Slot          | `process_max_fds`                            (gauge)        | Count |
+| `Threads`              | Slot          | `process_threads`                            (gauge)        | Count |
+
+`StorTransfers` uses a `{Slot, Status}` dimension pair so each status value
+(`success`, `failure`, etc.) becomes a separate CloudWatch time series.
+CloudWatch metric math can then express the failure rate as
+`failure / (success + failure)` without server-side aggregation.  If no
+transfer data is present yet nothing is pushed for this metric; CloudWatch
+handles sparse time series gracefully.
+
+Worst-case data points: 20 slots × (11 single-dim + ~2 status values) ≈ 260,
+well within CloudWatch's 1000-point-per-call limit.
 
 ---
 

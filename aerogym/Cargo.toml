@@ -1,5 +1,5 @@
 [package]
-name = "aerostress"
+name = "aerogym"
 version = "0.1.0"
 edition = "2024"
 
@@ -21,13 +21,6 @@ async-stream = "0.3.6"
 governor = "0.10"
 nonzero_ext = "0.3"
 socket2 = "0.6"
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
 
 [lints.rust]
 unsafe_code = "forbid"
