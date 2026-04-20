@@ -1,0 +1,70 @@
+#!/sbin/openrc-run
+
+description="AeroFTP aeroscale — backend management and autoscaling daemon"
+
+# ── Defaults (override in /etc/conf.d/aeroscale) ─────────────────────────────
+: ${AEROSCALE_BINARY:="/usr/local/bin/aeroscale"}
+: ${REDIS_URL:="redis://127.0.0.1:6379"}
+: ${REGION:="eu-west-2"}
+: ${ASG_NAME:="aeroftp-backend"}
+: ${WEIGHTS_DIR:="/etc/keepalived/weights"}
+: ${METRICS_PORT:="9090"}
+: ${SCRAPE_PORT:="9090"}
+: ${CLOUDWATCH_NAMESPACE:="AeroFTP/Autoscaler"}
+: ${SNAPSHOT_INTERVAL:="30"}
+: ${VIP_INSIDE:="172.16.32.10"}
+: ${WEIGHT_STATE_TTL:="3600"}
+: ${RUST_LOG:="info"}
+: ${LOGFILE:="/var/log/aeroscale.log"}
+: ${EXTRA_ARGS:=""}
+
+pidfile="/var/run/aeroscale.pid"
+
+depend() {
+	# Networking must be up (Redis and CloudWatch are remote)
+	need net
+
+	# keepalived start_pre creates /etc/keepalived/weights and the weight
+	# files; the aeroscale cannot work without them.
+	need keepalived
+}
+
+start_pre() {
+	checkpath --file --owner root:root --mode 0640 "${LOGFILE}"
+}
+
+start() {
+	ebegin "Starting aeroscale"
+
+	# supervise-daemon restarts the process automatically if it crashes.
+	# --respawn-delay avoids a tight restart loop on repeated failures.
+	supervise-daemon ${RC_SVCNAME} --start          \
+		--pidfile  "${pidfile}"                      \
+		--stdout   "${LOGFILE}"                      \
+		--stderr   "${LOGFILE}"                      \
+		--respawn-delay  5                           \
+		--respawn-period 60                          \
+		--env      "REDIS_URL=${REDIS_URL}"          \
+		--env      "RUST_LOG=${RUST_LOG}"            \
+		-- "${AEROSCALE_BINARY}"                    \
+			--region               "${REGION}"       \
+			--asg-name             "${ASG_NAME}"     \
+			--weights-dir          "${WEIGHTS_DIR}"  \
+			--metrics-port         "${METRICS_PORT}" \
+			--scrape-port          "${SCRAPE_PORT}"  \
+			--cloudwatch-namespace "${CLOUDWATCH_NAMESPACE}" \
+			--snapshot-interval    "${SNAPSHOT_INTERVAL}"   \
+			--vip-inside           "${VIP_INSIDE}"          \
+			--weight-state-ttl     "${WEIGHT_STATE_TTL}"    \
+			${EXTRA_ARGS}
+
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping aeroscale"
+	supervise-daemon ${RC_SVCNAME} --stop   \
+		--pidfile "${pidfile}"              \
+		--retry   "TERM/10/KILL/5"
+	eend $?
+}

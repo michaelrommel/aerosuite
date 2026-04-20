@@ -1,0 +1,103 @@
+#
+# Netfilter Configuration for AeroFTP
+#
+# This is needed to ensure, that only a restricted set of incoming
+# traffic is allowed and also that traffic that originates from this
+# host for DNS and HTTP/S is routed to the previous default gateway.
+#
+# Without this configuration, Active FTP will not work, because the
+# FTP Server needs to connect back to the port opened by the client
+# and this destination has an arbitrary IP address and any high port.
+#
+# drop any existing nftables ruleset
+flush ruleset
+
+# a common table for both IPv4 and IPv6
+table inet filter {
+
+	# protocols to allow
+	set allowed_protocols {
+		type inet_proto
+		elements = { icmp, icmpv6 }
+	}
+
+	# interfaces to accept any traffic on
+	set allowed_interfaces {
+		type ifname
+		elements = { "lo" }
+	}
+
+	# services to allow
+	set allowed_tcp_dports {
+		type inet_service
+		flags interval
+		# this selection also allows traffic to the builtin
+		# webserver on port 9090 for /metrics and /status
+		elements = { 20, 21, 22, 53, 1024-65535 }
+	}
+	set allowed_udp_dports {
+		type inet_service
+		flags interval
+		elements = { 53 }
+	}
+
+	# this chain gathers all accept conditions
+	chain allow {
+		ct state established,related accept
+
+		meta l4proto @allowed_protocols accept
+		iifname @allowed_interfaces accept
+		udp dport @allowed_udp_dports accept
+		tcp dport @allowed_tcp_dports accept
+	}
+
+	# base-chain for traffic to this host
+	chain INPUT {
+		type filter hook input priority filter + 20
+		policy accept
+
+		jump allow
+		reject with icmpx type port-unreachable
+	}
+
+	chain MARK {
+	    type filter hook prerouting priority mangle;
+	    # If it comes in on this interface, give it the mark so RPF validates it correctly
+	    iif "eth0" meta mark set 13
+	}
+
+	chain PRE {
+		type filter hook prerouting priority mangle;
+		# Restore the mark from the connection to the incoming packet
+		meta mark set ct mark
+	}
+
+	chain OUTPUT {
+		type route hook output priority mangle
+		policy accept
+
+		# HACK: route specific SSH packets back to my server for direct login
+		ip daddr 195.201.133.194 tcp sport 22 meta mark set 13
+		tcp dport 6379 meta mark set 13
+		tcp dport 80 meta mark set 13
+		tcp dport 443 meta mark set 13
+		tcp dport 53 meta mark set 13
+		udp dport 53 meta mark set 13
+
+		# Match your traffic and mark the connection (ct)
+		ip daddr 195.201.133.194 tcp sport 22 ct mark set 13
+		tcp dport { 80, 443, 6379, 53 } ct mark set 13
+		udp dport 53 ct mark set 13
+
+		# Also mark the current outgoing packet so the first packet routes correctly
+		meta mark set ct mark
+	}
+}
+
+table ip nat {
+	chain post {
+		type nat hook postrouting priority srcnat;
+		meta mark 13 oif "eth0" masquerade
+	}
+}
+

@@ -1,0 +1,247 @@
+#!/sbin/openrc-run
+
+description="Claims a Redis slot from the pool and keeps it alive via heartbeat"
+description_start="Claiming slot and starting heartbeat daemon"
+description_stop="Stopping heartbeat daemon and releasing slot"
+
+# Load defaults, then allow /etc/conf.d/aeroslot to override them
+: ${AWS_CONFIG_BINARY:="/usr/local/bin/aws-config"}
+: ${AEROSLOT_BINARY:="/usr/local/bin/aeroslot"}
+: ${AEROPLUG_BINARY:="/usr/local/bin/aeroplug"}
+: ${REDIS_URL:="redis://127.0.0.1:6379"}
+: ${TTL_MS:="30000"}
+: ${INTERVAL:="10"}
+: ${LOGFILE:="/var/log/aeroslot.log"}
+: ${FTP_PASSIVE_PORT_MIN:="20000"}
+: ${FTP_PASSIVE_PORT_COUNT="1500"}
+
+# These are used by OpenRC's built-in status / stop logic
+pidfile="/var/run/aeroslot/heartbeat.pid"
+conf_file="/var/run/aeroslot/aws.conf"
+slot_file="/var/run/aeroslot/slot"
+run_dir="/var/run/aeroslot"
+
+get_aws_config() {
+	# ── get instance info from AWS ───────────────────────────────────
+	einfo "Fetching instance info from AWS ..."
+
+	local info_out
+	info_out=$("${AWS_CONFIG_BINARY}" --out ${conf_file})
+	local info_rc=$?
+
+	if [ ${info_rc} -ne 0 ]; then
+		eerror "Getting instance info failed (exit ${info_rc}):"
+		eerror "${info_out}"
+		eend 1
+		return 1
+	fi
+}
+
+claim_slot() {
+	# ── claim a slot ─────────────────────────────────────────────────
+	einfo "Claiming slot from pool (instance-id: ${INSTANCE_ID}) ..."
+
+	local claim_out
+	claim_out=$(REDIS_URL="${REDIS_URL}" \
+		"${AEROSLOT_BINARY}" claim \
+			--instance-id "${INSTANCE_ID}" \
+			--ttl-ms	  "${TTL_MS}" 2>&1)
+	local claim_rc=$?
+
+	if [ ${claim_rc} -ne 0 ]; then
+		eerror "Slot claim failed (exit ${claim_rc}):"
+		eerror "${claim_out}"
+		eend 1
+		return 1
+	fi
+
+	# aeroslot prints the bare slot number alone on the last line
+	# so shell callers can capture it cleanly with tail -1.
+	local slot
+	slot=$(printf '%s' "${claim_out}" | tail -1)
+
+	# Sanity-check: must be a plain integer
+	if ! printf '%s' "${slot}" | grep -qE '^[0-9]+$'; then
+		eerror "Could not parse slot number from claim output:"
+		eerror "${claim_out}"
+		eend 1
+		return 1
+	fi
+
+	einfo "Claimed slot ${slot}"
+
+	# Persist the slot number so stop() and external scripts can read it
+	printf '%s\n' "${slot}" > "${slot_file}" || {
+		eerror "Cannot write slot file ${slot_file}"
+		eend 1
+		return 1
+	}
+}
+
+release_slot() {
+	# ── release the slot back to the pool ────────────────────────────
+	# Best-effort: a Redis outage must not block system shutdown.
+	# If this fails the lease will expire on its own after TTL_MS milliseconds.
+	slot=$1
+
+	. ${conf_file} 
+	if printf '%s' "${slot}" | grep -qE '^[0-9]+$'; then
+		einfo "Releasing slot ${slot} ..."
+		REDIS_URL="${REDIS_URL}" \
+			"${AEROSLOT_BINARY}" release \
+				--slot "${slot}" \
+				--instance-id "${INSTANCE_ID}" \
+			|| ewarn "Slot release failed — slot ${slot} will expire after TTL (${TTL_MS} ms)"
+	fi
+}
+
+set_passive_range() {
+	slot=$1
+	# ── determine passive port range ─────────────────────────────────────────────────
+	# now depending on the slot number we need to reserve a matching range of ports for
+	# the passive connections, that do not overlap with other instances.
+	FTP_PASSIVE_PORT_START=$((FTP_PASSIVE_PORT_MIN + FTP_PASSIVE_PORT_COUNT * slot))
+    FTP_PASSIVE_PORT_END=$((FTP_PASSIVE_PORT_START + FTP_PASSIVE_PORT_COUNT - 1))
+	FTP_PASSIVE_PORT_RANGE="${FTP_PASSIVE_PORT_START}-${FTP_PASSIVE_PORT_END}"
+
+	# set it for the AeroFTP daemon
+	sed -i "/FTP_PASSIVE_PORT_START/!b; c export FTP_PASSIVE_PORT_START=${FTP_PASSIVE_PORT_START}" /etc/conf.d/aeroftp
+	sed -i "/FTP_PASSIVE_PORT_END/!b; c export FTP_PASSIVE_PORT_END=${FTP_PASSIVE_PORT_END}" /etc/conf.d/aeroftp
+
+	# set it for the ip stack
+	sed -i "/net.ipv4.ip_local_reserved_ports/!b; c net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" /etc/sysctl.d/50-aeroftp.conf
+	grep -q "net.ipv4.ip_local_reserved_ports" /etc/sysctl.d/50-aeroftp.conf || echo "net.ipv4.ip_local_reserved_ports=${FTP_PASSIVE_PORT_RANGE}" >> /etc/sysctl.d/50-aeroftp.conf
+}
+
+attach_interface() {
+	slot=$1
+	# ── next grab the interface and attach it to this instance ──────────────────────────────────
+	if [ ! -d "/sys/class/net/eth1" ]; then
+		einfo "Attaching network interface (${slot})"
+		${AEROPLUG_BINARY} manage-eni --slot "$slot" --attach  # uses INSTANCE_ID implicitly via IMDS
+		einfo "Waiting for eth1 to appear..."
+		while [ ! -d "/sys/class/net/eth1" ]; do
+			sleep 1
+		done
+	else
+		ewarn "Interface already exists, check slot!"
+	fi
+}
+
+detach_interface() {
+	slot=$1
+	# ── detach and release the interface to the pool ──────────────────────────────────
+	${AEROPLUG_BINARY} manage-eni --slot "$slot" --detach
+	if [ -d "/sys/class/net/eth1" ]; then
+		einfo "Waiting for eth1 to disappear..."
+		while [ -d "/sys/class/net/eth1" ]; do
+			sleep 1
+		done
+	else
+		ewarn "Interface did not exist, check slot!"
+	fi
+}
+
+depend() {
+	# Hard dependency: networking must be up to reach Redis
+	need net
+
+	# Soft dependency: if a local 'redis' service exists, start after it —
+	# but do not fail if it is absent (Redis may be remote).
+	use redis
+
+	# Services that must start *after* aeroslot has a slot can declare:
+	#   depend() { need aeroslot; }
+	# in their own init script.
+	before aeroftp
+}
+
+start_pre() {
+	# Ensure the runtime directory exists with correct permissions
+	checkpath --directory --owner root:root --mode 0750 "${run_dir}"
+}
+
+start() {
+	ebegin "Starting aeroslot"
+
+	get_aws_config
+	. ${conf_file} 
+	claim_slot
+	slot=$(cat "${slot_file}")
+	set_passive_range $slot
+	attach_interface $slot
+	sysctl -p /etc/sysctl.d/50-aeroftp.conf
+
+	# ── launch the heartbeat daemon under supervise-daemon ───────────
+	# supervise-daemon monitors the process and calls crashed() if it
+	# exits without being asked to stop.  -respawn-max ensures a dead
+	# heartbeat is treated as a crash immediately rather than retried,
+	# so crashed() can detach the ENI without delay.
+	supervise-daemon ${RC_SVCNAME} --start \
+		--pidfile "${pidfile}" \
+		--stdout "${LOGFILE}" \
+		--stderr "${LOGFILE}" \
+		--respawn-max 0 \
+		--env "REDIS_URL=${REDIS_URL}" \
+		-- "${AEROSLOT_BINARY}" \
+			heartbeat \
+				--slot "${slot}" \
+				--instance-id "${INSTANCE_ID}" \
+				--ttl-ms "${TTL_MS}" \
+				--interval "${INTERVAL}" \
+				--retry-attempts 10
+
+	eend $?
+}
+
+crashed() {
+	# ── heartbeat exited prematurely ─────────────────────────────────
+	# Called by supervise-daemon when the supervised process exits
+	# without a corresponding service stop request.  We must detach the
+	# ENI and release the slot so the pool can reassign them; failure to
+	# do so would leave the interface dangling until the TTL expires.
+	local exit_code="$1"
+	ewarn "Heartbeat exited prematurely (exit ${exit_code}) — detaching ENI and releasing slot ..."
+
+	if [ -f "${slot_file}" ]; then
+		local slot
+		slot=$(cat "${slot_file}")
+		detach_interface "${slot}"
+		release_slot "${slot}"
+		rm -f "${slot_file}"
+	else
+		eerror "No slot file found at ${slot_file} — cannot release slot or detach ENI"
+	fi
+}
+
+stop() {
+	ebegin "Stopping aeroslot"
+
+	# ── stop the heartbeat daemon ────────────────────────────────────
+	# Send SIGTERM; the heartbeat loop catches it and exits cleanly.
+	# Fall back to SIGKILL after 10 s if it has not exited.
+	# supervise-daemon will NOT call crashed() for a supervised stop.
+	supervise-daemon ${RC_SVCNAME} --stop \
+		--pidfile "${pidfile}" \
+		--retry "TERM/10/KILL/5"
+	local daemon_rc=$?
+
+	if [ -f "${slot_file}" ]; then
+		local slot
+		slot=$(cat "${slot_file}")
+		detach_interface "${slot}"
+		release_slot "${slot}"
+		rm -f "${slot_file}"
+	else
+		eerror "No slot file found at ${slot_file} — cannot release slot or detach ENI"
+	fi
+
+	# Report success/failure based on the daemon stop, not the release step
+	eend ${daemon_rc}
+}
+
+stop_post() {
+	if [ "$RC_CMD" = "restart" ]; then
+		sleep 5
+	fi
+}

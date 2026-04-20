@@ -1,0 +1,35 @@
+# Configuration for the aeroslot OpenRC service.
+
+# Full path to the aeroslot binary
+export AEROSLOT_BINARY="/usr/local/bin/aeroslot"
+
+# Full path to the aws-config binary
+export AWS_CONFIG_BINARY="/usr/local/bin/aws-config"
+
+# Full path to the aeroplug binary
+export AEROPLUG_BINARY="/usr/local/bin/aeroplug"
+
+# Redis connection URL
+# For a local Redis: redis://127.0.0.1:6379
+# For a remote Redis with auth: redis://:password@192.168.1.10:6379
+export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.eu-west-2.amazonaws.com:6379
+
+# Lease time-to-live in milliseconds.
+# The slot will expire this long after the last successful heartbeat.
+# Must be longer than INTERVAL * 1000 with a comfortable safety margin.
+export TTL_MS="90000"
+
+# How often the heartbeat daemon renews the lease, in seconds.
+# Rule of thumb: TTL_MS / 1000 / 3  (renew at 1/3 of the TTL)
+export INTERVAL="30"
+
+# the global offset for the passive ftp port range and the number of ports
+# that each instance gets
+export FTP_PASSIVE_PORT_MIN="20000"
+export FTP_PASSIVE_PORT_COUNT="1500"
+
+# Log file for heartbeat daemon stdout/stderr
+export LOGFILE="/var/log/aeroslot.log"
+
+# the rust log level, override for production, please!
+export RUST_LOG=trace

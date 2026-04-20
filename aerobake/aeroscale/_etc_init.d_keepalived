@@ -1,0 +1,271 @@
+#!/sbin/openrc-run
+
+extra_started_commands="data reload stats"
+description_data="Write configuration data to /tmp/keepalived.data"
+description_reload="Close down all interfaces, reload its configuration, and start up with new configuration"
+description_stats="Print statistics info"
+
+: ${cfgfile:="/etc/keepalived/keepalived.conf"}
+
+command="/usr/sbin/keepalived"
+# Note: KEEPALIVED_OPTS is for backward compatibility.
+command_args="
+	--dont-fork
+	--use-file=$cfgfile
+	${config_id:+"--config-id=$config_id"}
+	${command_args:-${KEEPALIVED_OPTS:-}}"
+command_background="yes"
+pidfile="/run/$RC_SVCNAME.pid"
+
+required_files="$cfgfile"
+
+depend() {
+	use logger
+	# The interfaces do not actually need to exist to start,
+	# it handles them gracefully.
+	use net
+}
+
+# ── IMDS helpers ──────────────────────────────────────────────────────────────
+
+# Fetch an IMDSv2 session token and the keepalived-role instance tag,
+# storing results in the caller-supplied variable names.
+#
+# Usage:
+#   fetch_imds_role TOKEN_VAR ROLE_VAR
+#
+# On success both variables are set and the function returns 0.
+# On failure an eerror is printed and the function returns 1.
+fetch_imds_role() {
+	local _token_var="$1"
+	local _role_var="$2"
+
+	local _token
+	_token=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+		-H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+
+	if [ -z "$_token" ]; then
+		eerror "Failed to fetch IMDSv2 token"
+		return 1
+	fi
+
+	local _role
+	_role=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
+		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-role)
+
+	if [ -z "$_role" ]; then
+		eerror "Failed to fetch keepalived-role tag from IMDS"
+		return 1
+	fi
+
+	eval "${_token_var}=\"\${_token}\""
+	eval "${_role_var}=\"\${_role}\""
+}
+
+# Fetch eth1 network parameters from IMDS once the interface is up.
+# Must be called after 'ip link set eth1 up' so that the MAC is readable
+# from sysfs.
+#
+# Usage:
+#   fetch_imds_eth1 TOKEN PREFIX_VAR PEER_IP_VAR
+#
+# Outputs:
+#   PREFIX_VAR   — numeric prefix length of the inside subnet (e.g. 26)
+#   PEER_IP_VAR  — inside IP of the keepalived peer from the instance tag
+#
+# Sources:
+#   prefix   → network/interfaces/macs/<mac>/subnet-ipv4-cidr-block
+#               returns "172.16.32.0/26"; we take the part after "/"
+#   peer IP  → tags/instance/keepalived-peer-inside
+#               set on the ASG with propagate-at-launch
+fetch_imds_eth1() {
+	local _token="$1"
+	local _prefix_var="$2"
+	local _peer_var="$3"
+
+	local _mac
+	_mac=$(cat /sys/class/net/eth1/address 2>/dev/null)
+	if [ -z "$_mac" ]; then
+		eerror "Cannot read eth1 MAC from sysfs — is the interface up?"
+		return 1
+	fi
+
+	local _cidr
+	_cidr=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
+		"http://169.254.169.254/latest/meta-data/network/interfaces/macs/$_mac/subnet-ipv4-cidr-block")
+	if [ -z "$_cidr" ]; then
+		eerror "Failed to fetch subnet CIDR for eth1 MAC $_mac from IMDS"
+		return 1
+	fi
+	# "172.16.32.0/26" → "26"
+	local _prefix="${_cidr##*/}"
+
+	local _peer
+	_peer=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
+		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-peer-inside)
+	if [ -z "$_peer" ]; then
+		eerror "Failed to fetch keepalived-peer-inside tag from IMDS"
+		return 1
+	fi
+
+	eval "${_prefix_var}=\"\${_prefix}\""
+	eval "${_peer_var}=\"\${_peer}\""
+}
+
+# ── Custom commands ───────────────────────────────────────────────────────────
+
+data() {
+	ebegin "Writing configuration data to /tmp/keepalived.data"
+	start-stop-daemon --pidfile $pidfile --signal USR1
+	eend $?
+}
+
+reload() {
+	ebegin "Reloading keepalived.conf"
+	start-stop-daemon --pidfile $pidfile --signal HUP
+	eend $?
+}
+
+stats() {
+	ebegin "Dumping stats"
+	start-stop-daemon --pidfile $pidfile --signal USR2
+	eend $?
+
+	cat /tmp/keepalived.stats
+}
+
+# ── Lifecycle hooks ───────────────────────────────────────────────────────────
+
+start_pre() {
+	local TOKEN ROLE
+	fetch_imds_role TOKEN ROLE || return 1
+
+	local attach_out
+	attach_out=$(aeroplug attach-eni \
+		--tag aeroftp-lb=$ROLE \
+		--attach \
+		--region eu-west-2)
+	local attach_rc=$?
+
+	if [ ${attach_rc} -ne 0 ]; then
+		eerror "attach ENI failed (exit ${attach_rc}):"
+		eerror "${attach_out}"
+		eend 1
+		return 1
+	fi
+
+	local IP
+	IP=$(printf '%s' "${attach_out}" | grep "ENI primary private IP:" | sed -e 's/.*IP: \(.*\)/\1/')
+
+	einfo "Waiting for eth1 to appear..."
+	while [ ! -d "/sys/class/net/eth1" ]; do
+		sleep 1
+	done
+
+	ip link set eth1 up
+
+	# Fetch prefix length and peer IP from IMDS now that eth1 is up and its
+	# MAC is readable.  This avoids hardcoding the /26 prefix and the peer IP.
+	local PREFIX PEER_INSIDE
+	fetch_imds_eth1 "$TOKEN" PREFIX PEER_INSIDE || return 1
+
+	ip a add "$IP/$PREFIX" dev eth1
+
+	# Sleep before starting keepalived so eth1 is fully initialised and the
+	# unicast path to the peer is reachable.  Without this delay the VRRP dead
+	# interval (3 × advert_int = 3 s) may expire before the first heartbeat
+	# arrives, causing this node to elect itself MASTER instead of honouring
+	# nopreempt.
+	sleep 5
+
+	mkdir -p /etc/keepalived/weights
+
+	# All backends start in draining state (weight file = -1).
+	# A separate process will set each file to 0 (active) or -2147483648
+	# (removed) based on actual backend health.
+	for ip in \
+		172.16.32.20 \
+		172.16.32.21 \
+		172.16.32.22 \
+		172.16.32.23 \
+		172.16.32.24 \
+		172.16.32.25 \
+		172.16.32.26 \
+		172.16.32.27 \
+		172.16.32.28 \
+		172.16.32.29 \
+		172.16.32.30 \
+		172.16.32.31 \
+		172.16.32.32 \
+		172.16.32.33 \
+		172.16.32.34 \
+		172.16.32.35 \
+		172.16.32.36 \
+		172.16.32.37 \
+		172.16.32.38 \
+		172.16.32.39 \
+		; do
+		WF="/etc/keepalived/weights/backend-${ip}.weight"
+		if [ ! -f "$WF" ]; then
+			# only create if not already present
+			echo "-1" > "$WF"
+		fi
+	done
+
+	/usr/local/bin/aeropulse --auth-pass "$VRRP_PASS"
+
+	chown root:root /etc/keepalived/notify-master.sh
+	chown root:root /etc/keepalived/notify-backup.sh
+	chown root:root /etc/keepalived/chk-backends.sh
+	chown root:root /etc/keepalived/chk-forward-path.sh
+	chmod 755 /etc/keepalived/notify-master.sh
+	chmod 755 /etc/keepalived/notify-backup.sh
+	chmod 755 /etc/keepalived/chk-backends.sh
+	chmod 755 /etc/keepalived/chk-forward-path.sh
+
+	# ── Prime AWS security group connection tracking for Protocol 112 ─────────
+	# At cold boot the AWS stateful security group has no entry for inbound
+	# Protocol 112 (VRRP) from the peer.  Without a prior outbound packet the
+	# peer's VRRP advertisements are silently dropped, the dead interval
+	# expires, and this node incorrectly elects itself MASTER.
+	#
+	# Sending one outbound Protocol 112 packet to the peer creates the reverse-
+	# direction stateful entry so that inbound VRRP is allowed before keepalived
+	# opens its socket.  The payload content is irrelevant for this purpose —
+	# only the protocol number and destination IP matter for the tracking entry.
+	# Payload: Ver/Type(21), VRID(01), Prio(50), Count(01), Auth(01), Int(01), 
+	#          Checksum(xxxx), VIP(c0a80101), Authentication(xxxx)
+	einfo "Priming Protocol 112 connection tracking toward ${PEER_INSIDE}..."
+	printf '\x21\x01\x32\x01\x01\x01\x42\x45\xc0\xa8\x01\x01\x63\x30\x66\x57\x6d\x2c\x71\x59' | \
+		socat - "IP4-DATAGRAM:${PEER_INSIDE}:112,ip-ttl=255" 2>/dev/null || true
+}
+
+stop_post() {
+	# ── Remove the inside IP from eth1 ───────────────────────────────────────
+	# Read the current address directly from the interface so stop_post is
+	# self-contained and does not rely on any variable set during start_pre.
+	local INSIDE_IP
+	INSIDE_IP=$(ip -4 addr show eth1 2>/dev/null | awk '/inet / { print $2 }')
+
+	if [ -n "$INSIDE_IP" ]; then
+		einfo "Removing inside IP ${INSIDE_IP} from eth1"
+		ip addr del "$INSIDE_IP" dev eth1
+	fi
+
+	# ── Bring eth1 down ───────────────────────────────────────────────────────
+	if [ -d "/sys/class/net/eth1" ]; then
+		einfo "Bringing eth1 down"
+		ip link set eth1 down
+	fi
+
+	# ── Detach the inside ENI ─────────────────────────────────────────────────
+	local TOKEN ROLE
+	fetch_imds_role TOKEN ROLE || return 1
+
+	ebegin "Detaching inside ENI (aeroftp-lb=${ROLE})"
+	aeroplug attach-eni \
+		--tag aeroftp-lb="$ROLE" \
+		--detach \
+		--region eu-west-2
+	eend $?
+}

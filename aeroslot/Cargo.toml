@@ -1,0 +1,21 @@
+[package]
+name        = "aeroslot"
+version     = "0.1.0"
+edition     = "2021"
+publish     = false
+
+[[bin]]
+name = "aeroslot"
+path = "src/main.rs"
+
+[[bin]]
+name = "aeroslot-lua"
+path = "src/lua.rs"
+
+[dependencies]
+aerocore         = { path = "../aerocore" }
+anyhow           = { workspace = true }
+clap             = { workspace = true }
+redis            = { workspace = true }
+serde_json       = { workspace = true }
+tokio            = { workspace = true }
