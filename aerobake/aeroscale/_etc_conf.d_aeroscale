@@ -48,13 +48,48 @@ export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.${REGION
 # Must match vip_inside configured in aeropulse / keepalived.conf.
 : ${VIP_INSIDE:="172.16.32.10"}
 
-# ── Weight state persistence ──────────────────────────────────────────────────────
+# ── Weight state persistence ─────────────────────────────────────────────────
 # Maximum age (seconds) of Redis weight state before it is considered stale
 # and recomputed from current lease state instead of being restored.
 # Default: 5 minutes.  Covers the time needed for a rolling upgrade.
 : ${WEIGHT_STATE_TTL:="3600"}
 
-# ── Safety ─────────────────────────────────────────────────────────────────────
+# ── Autoscaling ───────────────────────────────────────────────────────────────
+# All scaling decisions are driven by IPVS active-connection counts (the
+# load-balancer's real-time view), not by per-backend Prometheus scrapes.
+
+# Average IPVS active connections per active backend above which a scale-up is
+# triggered.  Recommended: 50% of the per-backend design maximum (1500).
+: ${SCALE_UP_THRESHOLD:="750"}
+
+# Maximum IPVS active connections allowed on the busiest remaining backend
+# after the drain candidate is removed.  If the worst-case redistribution
+# would exceed this, no drain is initiated.  Recommended: 33% of design max.
+: ${DRAIN_THRESHOLD:="500"}
+
+# Number of consecutive 30-second snapshot cycles a condition must persist
+# before the action is taken.  3 cycles = ~90 seconds of sustained load.
+: ${HYSTERESIS_CYCLES:="3"}
+
+# Minimum seconds between two consecutive scale-up actions.
+# AWS typically needs 2-3 minutes to bring a new backend InService.
+: ${SCALE_UP_COOLDOWN:="120"}
+
+# Minimum seconds between two consecutive drain initiations.
+: ${DRAIN_COOLDOWN:="300"}
+
+# Percentage difference between IPVS active connections and the backend's
+# scraped ftp_sessions_total that triggers a cross-check warning.
+# Set to 0 to warn on any non-zero difference.
+: ${SCRAPE_MISMATCH_PCT:="5"}
+
+# Whether TerminateInstanceInAutoScalingGroup also decrements the ASG
+# desired-capacity counter.
+# Set to "false" during testing so the ASG launches a replacement automatically.
+# Set to "true" in production to scale the fleet down as backends terminate.
+: ${TERM_DECREMENTS_CAPACITY:="true"}
+
+# ── Safety ────────────────────────────────────────────────────────────────────
 # Set to "--dry-run" to log all actions without performing any writes.
 # Useful for validating behaviour on a new deployment before going live.
 : ${EXTRA_ARGS:=""}

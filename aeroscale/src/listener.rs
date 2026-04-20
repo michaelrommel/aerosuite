@@ -62,13 +62,14 @@ struct AsgChangeMsg {
 ///
 /// This is a plain `async fn` — call it inside `tokio::spawn`.
 pub async fn run(
-    redis_client: redis::Client,
-    slot_network: Arc<SlotNetwork>,
-    weights_dir:  String,
-    region:       String,
-    creds:        Arc<AwsCredentials>,
-    notify:       Arc<Notify>,
-    dry_run:      bool,
+    redis_client:             redis::Client,
+    slot_network:             Arc<SlotNetwork>,
+    weights_dir:              String,
+    region:                   String,
+    creds:                    Arc<AwsCredentials>,
+    notify:                   Arc<Notify>,
+    dry_run:                  bool,
+    term_decrements_capacity: bool,
 ) {
     loop {
         match subscribe_once(
@@ -79,6 +80,7 @@ pub async fn run(
             &creds,
             &notify,
             dry_run,
+            term_decrements_capacity,
         )
         .await
         {
@@ -92,13 +94,14 @@ pub async fn run(
 // ── Inner loop (one connection lifetime) ─────────────────────────────────────
 
 async fn subscribe_once(
-    redis_client: &redis::Client,
-    slot_network: &SlotNetwork,
-    weights_dir:  &str,
-    region:       &str,
-    creds:        &AwsCredentials,
-    notify:       &Notify,
-    dry_run:      bool,
+    redis_client:             &redis::Client,
+    slot_network:             &SlotNetwork,
+    weights_dir:              &str,
+    region:                   &str,
+    creds:                    &AwsCredentials,
+    notify:                   &Notify,
+    dry_run:                  bool,
+    term_decrements_capacity: bool,
 ) -> Result<()> {
     let mut pubsub = redis_client
         .get_async_pubsub()
@@ -127,7 +130,7 @@ async fn subscribe_once(
             Err(e) => { warn!("asg-change: cannot parse JSON '{raw}': {e}"); continue; }
         };
 
-        handle_message(parsed, slot_network, weights_dir, region, creds, notify, dry_run).await;
+        handle_message(parsed, slot_network, weights_dir, region, creds, notify, dry_run, term_decrements_capacity).await;
     }
 
     Ok(())
@@ -136,13 +139,14 @@ async fn subscribe_once(
 // ── Message handler ───────────────────────────────────────────────────────────
 
 async fn handle_message(
-    msg:          AsgChangeMsg,
-    slot_network: &SlotNetwork,
-    weights_dir:  &str,
-    region:       &str,
-    creds:        &AwsCredentials,
-    notify:       &Notify,
-    dry_run:      bool,
+    msg:                      AsgChangeMsg,
+    slot_network:             &SlotNetwork,
+    weights_dir:              &str,
+    region:                   &str,
+    creds:                    &AwsCredentials,
+    notify:                   &Notify,
+    dry_run:                  bool,
+    term_decrements_capacity: bool,
 ) {
     let ip = slot_network.ip_for_slot(msg.slot);
 
@@ -172,7 +176,7 @@ async fn handle_message(
 
             match msg.instance_id.as_deref() {
                 Some(instance_id) => {
-                    if let Err(e) = terminate_instance(instance_id, region, creds, dry_run).await {
+                    if let Err(e) = terminate_instance(instance_id, region, creds, dry_run, term_decrements_capacity).await {
                         error!(
                             slot = msg.slot,
                             instance_id,

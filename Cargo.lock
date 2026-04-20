@@ -20,25 +20,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerogym"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "futures",
- "governor",
- "log",
- "nonzero_ext",
- "pretty_env_logger",
- "rand 0.10.1",
- "socket2",
- "suppaftp",
- "tokio",
- "tokio-stream",
- "tokio-util",
-]
-
-[[package]]
 name = "aeroplug"
 version = "0.1.0"
 dependencies = [
@@ -90,6 +71,25 @@ dependencies = [
  "redis",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "aerostress"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "futures",
+ "governor",
+ "log",
+ "nonzero_ext",
+ "pretty_env_logger",
+ "rand 0.10.1",
+ "socket2",
+ "suppaftp",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
 ]
 
 [[package]]

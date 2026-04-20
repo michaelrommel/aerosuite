@@ -57,14 +57,19 @@ pub fn new_store() -> MetricsStore {
 
 /// Scrape all backends that have a live (non-expired) lease, update the store,
 /// cross-check against IPVS, and push to CloudWatch.
+///
+/// `scrape_mismatch_pct` — emit a warning when `ftp_sessions_total` (scraped
+/// from the backend) and IPVS `active_connections` differ by more than this
+/// percentage.  Set to 0.0 to warn on any non-zero difference.
 pub async fn scrape_and_push(
-    snapshot:    &SystemSnapshot,
-    store:       &MetricsStore,
-    scrape_port: u16,
-    region:      &str,
-    creds:       &aerocore::AwsCredentials,
-    namespace:   &str,
-    is_master:   bool,
+    snapshot:            &SystemSnapshot,
+    store:               &MetricsStore,
+    scrape_port:         u16,
+    region:              &str,
+    creds:               &aerocore::AwsCredentials,
+    namespace:           &str,
+    is_master:           bool,
+    scrape_mismatch_pct: f64,
 ) {
     // ── Scrape ─────────────────────────────────────────────────────────────────
     let mut results: Vec<BackendMetrics> = Vec::new();
@@ -102,7 +107,9 @@ pub async fn scrape_and_push(
         // ── IPVS cross-check ──────────────────────────────────────────────────
         // Compare ftp_sessions_total (from the backend itself) with the
         // active-connection count reported by IPVS (from the load balancer).
-        // Discrepancies can indicate routing issues or stale IPVS entries.
+        // Only warn when the relative difference exceeds scrape_mismatch_pct,
+        // which avoids noise from normal sampling jitter on lightly-loaded
+        // backends while still surfacing real routing or counting anomalies.
         if backend_metrics.error.is_none() {
             let ftp_sessions = backend_metrics.samples.iter()
                 .find(|s| s.metric == "ftp_sessions_total" && s.labels.is_empty())
@@ -113,16 +120,27 @@ pub async fn scrape_and_push(
                 .map(|i| i.active_connections)
                 .unwrap_or(0);
 
-            // Only warn when both sides report non-zero and differ meaningfully.
-            if ftp_sessions != ipvs_active && (ftp_sessions > 0 || ipvs_active > 0) {
-                warn!(
-                    slot,
-                    ip       = %b.ip,
-                    instance = live_lease.owner_instance_id.as_str(),
-                    ftp_sessions,
-                    ipvs_active,
-                    "ftp_sessions_total vs IPVS active-connections mismatch"
-                );
+            if ftp_sessions != ipvs_active {
+                let larger = ftp_sessions.max(ipvs_active) as f64;
+                if larger > 0.0 {
+                    let diff_pct = (ftp_sessions as f64 - ipvs_active as f64).abs()
+                        / larger
+                        * 100.0;
+                    if diff_pct > scrape_mismatch_pct {
+                        warn!(
+                            slot,
+                            ip       = %b.ip,
+                            instance = live_lease.owner_instance_id.as_str(),
+                            ftp_sessions,
+                            ipvs_active,
+                            diff_pct = format_args!("{diff_pct:.1}%"),
+                            threshold_pct = format_args!("{scrape_mismatch_pct:.1}%"),
+                            "ftp_sessions_total vs IPVS active-connections mismatch"
+                        );
+                    } else {
+                        debug!(slot, ftp_sessions, ipvs_active, "IPVS cross-check OK (within {scrape_mismatch_pct:.1}%)");
+                    }
+                }
             } else {
                 debug!(slot, ftp_sessions, ipvs_active, "IPVS cross-check OK");
             }

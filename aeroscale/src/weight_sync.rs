@@ -59,7 +59,7 @@ pub async fn init(
     ttl_secs:     u64,
 ) -> Result<()> {
     let now       = now_ms();
-    let ttl_ms    = ttl_secs * 1000;
+    let _ttl_ms    = ttl_secs * 1000;
 
     let ts: Option<String> = redis_con
         .get(KEY_BACKEND_WEIGHTS_TS)

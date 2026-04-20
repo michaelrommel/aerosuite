@@ -116,7 +116,7 @@ async fn cmd_terminate(
 ) -> Result<()> {
     println!("🛑 Terminating instance '{instance_id}' in ASG '{asg_name}' ...");
     println!("   DesiredCapacity will be decremented by 1 automatically.");
-    asg::terminate_instance(region, instance_id, creds).await?;
+    asg::terminate_instance(region, instance_id, creds, /*decrement=*/true).await?;
     println!("✅ Termination request accepted.");
     println!("   Run 'scale list' to watch the instance leave the group.");
     Ok(())

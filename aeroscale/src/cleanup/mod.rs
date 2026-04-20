@@ -19,7 +19,7 @@ use redis::{aio::MultiplexedConnection, AsyncCommands};
 use tracing::{debug, error, info, warn};
 
 use aerocore::{asg, redis_pool::{key_owner, now_ms, KEY_AVAILABLE, KEY_LEASES}, AwsCredentials};
-use crate::snapshot::{AsgInstance, BackendState, BackendStatus, SlotLease, SystemSnapshot};
+use crate::snapshot::{BackendState, SlotLease, SystemSnapshot};
 
 // ── Weight file constants ─────────────────────────────────────────────────────
 
@@ -33,14 +33,19 @@ pub const WEIGHT_DISABLED: &str = "-2147483648";
 ///
 /// On the VRRP backup this is a no-op: the backup maintains its weight files
 /// by syncing from Redis rather than running independent cleanup logic.
+///
+/// `term_decrements_capacity` controls whether `TerminateInstance` asks AWS
+/// to also decrement the ASG desired-capacity counter.  Set to `false` during
+/// testing so the ASG immediately launches a replacement; `true` in production.
 pub async fn run(
-    snapshot:    &SystemSnapshot,
-    weights_dir: &str,
-    region:      &str,
-    creds:       &AwsCredentials,
-    redis_con:   &mut MultiplexedConnection,
-    dry_run:     bool,
-    is_master:   bool,
+    snapshot:                &SystemSnapshot,
+    weights_dir:             &str,
+    region:                  &str,
+    creds:                   &AwsCredentials,
+    redis_con:               &mut MultiplexedConnection,
+    dry_run:                 bool,
+    is_master:               bool,
+    term_decrements_capacity: bool,
 ) -> Result<()> {
     if !is_master {
         debug!("backup mode — skipping cleanup pass");
@@ -48,8 +53,8 @@ pub async fn run(
     }
     info!("── cleanup pass ──────────────────────────────────────────────────────────");
 
-    section_21_active_leases(snapshot, weights_dir, region, creds, redis_con, dry_run).await;
-    section_22_orphaned_asg_instances(snapshot, region, creds, dry_run).await;
+    section_21_active_leases(snapshot, weights_dir, region, creds, redis_con, dry_run, term_decrements_capacity).await;
+    section_22_orphaned_asg_instances(snapshot, region, creds, dry_run, term_decrements_capacity).await;
     section_23_backends_without_leases(snapshot, weights_dir, dry_run).await;
 
     info!("── cleanup pass done ─────────────────────────────────────────────────────");
@@ -59,19 +64,20 @@ pub async fn run(
 // ── 2.1 — Active leases ───────────────────────────────────────────────────────
 
 async fn section_21_active_leases(
-    snapshot:    &SystemSnapshot,
-    weights_dir: &str,
-    region:      &str,
-    creds:       &AwsCredentials,
-    redis_con:   &mut MultiplexedConnection,
-    dry_run:     bool,
+    snapshot:                &SystemSnapshot,
+    weights_dir:             &str,
+    region:                  &str,
+    creds:                   &AwsCredentials,
+    redis_con:               &mut MultiplexedConnection,
+    dry_run:                 bool,
+    term_decrements_capacity: bool,
 ) {
     let asg_ids: std::collections::HashSet<&str> =
         snapshot.asg.iter().map(|i| i.instance_id.as_str()).collect();
 
     for lease in &snapshot.leases {
         let result = handle_lease(
-            lease, &asg_ids, snapshot, weights_dir, region, creds, redis_con, dry_run,
+            lease, &asg_ids, snapshot, weights_dir, region, creds, redis_con, dry_run, term_decrements_capacity,
         )
         .await;
 
@@ -86,14 +92,15 @@ async fn section_21_active_leases(
 }
 
 async fn handle_lease(
-    lease:       &SlotLease,
-    asg_ids:     &std::collections::HashSet<&str>,
-    snapshot:    &SystemSnapshot,
-    weights_dir: &str,
-    region:      &str,
-    creds:       &AwsCredentials,
-    redis_con:   &mut MultiplexedConnection,
-    dry_run:     bool,
+    lease:                   &SlotLease,
+    asg_ids:                 &std::collections::HashSet<&str>,
+    snapshot:                &SystemSnapshot,
+    weights_dir:             &str,
+    region:                  &str,
+    creds:                   &AwsCredentials,
+    redis_con:               &mut MultiplexedConnection,
+    dry_run:                 bool,
+    term_decrements_capacity: bool,
 ) -> Result<()> {
     let slot     = lease.slot;
     let owner    = &lease.owner_instance_id;
@@ -153,7 +160,7 @@ async fn handle_lease(
                     "draining backend has 0 active connections — disabling and terminating"
                 );
                 write_weight(weights_dir, b.ip, WEIGHT_DISABLED, dry_run).await?;
-                terminate_instance(owner, region, creds, dry_run).await?;
+                terminate_instance(owner, region, creds, dry_run, term_decrements_capacity).await?;
             } else {
                 info!(
                     slot, owner = %owner, ip = %b.ip, active_conn,
@@ -201,10 +208,11 @@ async fn handle_lease(
 // ── 2.2 — Orphaned ASG instances ─────────────────────────────────────────────
 
 async fn section_22_orphaned_asg_instances(
-    snapshot: &SystemSnapshot,
-    region:   &str,
-    creds:    &AwsCredentials,
-    dry_run:  bool,
+    snapshot:                &SystemSnapshot,
+    region:                  &str,
+    creds:                   &AwsCredentials,
+    dry_run:                 bool,
+    term_decrements_capacity: bool,
 ) {
     let leased_owners: std::collections::HashSet<&str> =
         snapshot.leases.iter().map(|l| l.owner_instance_id.as_str()).collect();
@@ -215,7 +223,7 @@ async fn section_22_orphaned_asg_instances(
                 instance_id = %inst.instance_id,
                 "InService ASG instance has no slot lease — possible ENI leak; terminating"
             );
-            if let Err(e) = terminate_instance(&inst.instance_id, region, creds, dry_run).await {
+            if let Err(e) = terminate_instance(&inst.instance_id, region, creds, dry_run, term_decrements_capacity).await {
                 error!(instance_id = %inst.instance_id, "terminate failed: {e:#}");
             }
         }
@@ -307,17 +315,22 @@ async fn release_slot(
     Ok(())
 }
 
-/// Terminate an ASG instance and decrement desired capacity.
+/// Terminate an ASG instance.
+///
+/// When `decrement` is `true` the ASG desired-capacity counter is decremented
+/// by 1 (production behaviour).  Pass `false` in test environments where you
+/// want the ASG to launch a replacement automatically.
 pub(crate) async fn terminate_instance(
     instance_id: &str,
     region:      &str,
     creds:       &AwsCredentials,
     dry_run:     bool,
+    decrement:   bool,
 ) -> Result<()> {
     if dry_run {
-        info!("[DRY-RUN] terminate instance {instance_id}");
+        info!("[DRY-RUN] terminate instance {instance_id} (decrement_capacity={decrement})");
         return Ok(());
     }
-    info!("terminating instance {instance_id}");
-    asg::terminate_instance(region, instance_id, creds).await
+    info!("terminating instance {instance_id} (decrement_capacity={decrement})");
+    asg::terminate_instance(region, instance_id, creds, decrement).await
 }

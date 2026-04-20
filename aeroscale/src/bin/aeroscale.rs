@@ -19,6 +19,7 @@ use aeroscale::{
     cleanup,
     listener,
     metrics::{self, MetricsStore},
+    scaler::{ScaleConfig, ScalerState},
     slot_network::SlotNetwork,
     snapshot::SystemSnapshot,
     vrrp,
@@ -103,6 +104,47 @@ struct Args {
     /// Set to 0 to always recompute from leases (never restore from Redis).
     #[arg(long, default_value_t = 3600)]
     weight_state_ttl: u64,
+
+    // ── Autoscaling ───────────────────────────────────────────────────────────
+
+    /// Average IPVS active connections per active backend above which a
+    /// scale-up is triggered.  Recommended: 50% of the per-backend design
+    /// maximum.  Default: 750 (50% of 1500).
+    #[arg(long, default_value_t = 750)]
+    scale_up_threshold: u32,
+
+    /// Maximum IPVS active connections on the busiest remaining backend after
+    /// a drain candidate is removed.  If the worst-case redistribution would
+    /// exceed this, no drain is initiated.  Recommended: 33% of per-backend
+    /// design maximum.  Default: 500 (33% of 1500).
+    #[arg(long, default_value_t = 500)]
+    drain_threshold: u32,
+
+    /// Number of consecutive snapshot cycles a scale-up or drain condition
+    /// must persist before the action is taken (flap prevention).
+    #[arg(long, default_value_t = 3)]
+    hysteresis_cycles: u32,
+
+    /// Minimum seconds between two consecutive scale-up actions.
+    /// AWS typically needs 2–3 minutes to bring a new backend InService.
+    #[arg(long, default_value_t = 120)]
+    scale_up_cooldown_secs: u64,
+
+    /// Minimum seconds between two consecutive drain initiations.
+    #[arg(long, default_value_t = 300)]
+    drain_cooldown_secs: u64,
+
+    /// Percentage difference between IPVS active connections and the backend's
+    /// scraped ftp_sessions_total above which a warning is emitted.  Set to
+    /// 0.0 to warn on any non-zero difference.
+    #[arg(long, default_value_t = 5.0)]
+    scrape_mismatch_pct: f64,
+
+    /// Whether TerminateInstanceInAutoScalingGroup should also decrement the
+    /// ASG desired-capacity counter.  Set to false for testing to let the ASG
+    /// launch a replacement automatically.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    term_decrements_capacity: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -130,6 +172,13 @@ async fn main() -> Result<()> {
         dry_run              = args.dry_run,
         vip_inside           = %args.vip_inside.map(|v| v.to_string()).unwrap_or_else(|| "unset (assuming master)".into()),
         weight_state_ttl     = args.weight_state_ttl,
+        scale_up_threshold   = args.scale_up_threshold,
+        drain_threshold      = args.drain_threshold,
+        hysteresis_cycles    = args.hysteresis_cycles,
+        scale_up_cooldown    = args.scale_up_cooldown_secs,
+        drain_cooldown       = args.drain_cooldown_secs,
+        scrape_mismatch_pct  = args.scrape_mismatch_pct,
+        term_decrements_capacity = args.term_decrements_capacity,
         "aeroscale starting"
     );
 
@@ -211,6 +260,7 @@ async fn main() -> Result<()> {
         Arc::clone(&creds),
         Arc::clone(&notify),
         args.dry_run,
+        args.term_decrements_capacity,
     ));
 
     let metrics_store: MetricsStore = metrics::new_store();
@@ -218,6 +268,19 @@ async fn main() -> Result<()> {
         Arc::clone(&metrics_store),
         args.metrics_port,
     ));
+
+    // ── Build scale config (immutable for the lifetime of the daemon) ─────────
+    let scale_config = ScaleConfig {
+        scale_up_threshold:      args.scale_up_threshold,
+        drain_threshold:         args.drain_threshold,
+        hysteresis_cycles:       args.hysteresis_cycles,
+        scale_up_cooldown_secs:  args.scale_up_cooldown_secs,
+        drain_cooldown_secs:     args.drain_cooldown_secs,
+    };
+
+    // Mutable scaler state: hysteresis counters and last-action timestamps.
+    // Lives outside the loop so state is preserved between cycles.
+    let mut scaler_state = ScalerState::default();
 
     // ── Refresh loop ──────────────────────────────────────────────────────────
 
@@ -263,6 +326,7 @@ async fn main() -> Result<()> {
                     &mut redis_con,
                     args.dry_run,
                     is_master,
+                    args.term_decrements_capacity,
                 )
                 .await
                 {
@@ -287,10 +351,27 @@ async fn main() -> Result<()> {
                     &creds,
                     &args.cloudwatch_namespace,
                     is_master,
+                    args.scrape_mismatch_pct,
                 )
                 .await;
 
-                // TODO P5: scale-up / drain algorithm
+                // P5: Scale-up / drain algorithm (master only)
+                if is_master {
+                    if let Err(e) = aeroscale::scaler::run(
+                        &snapshot,
+                        &scale_config,
+                        &mut scaler_state,
+                        &args.asg_name,
+                        &args.region,
+                        &creds,
+                        &args.weights_dir,
+                        args.dry_run,
+                    )
+                    .await
+                    {
+                        error!("scaler pass failed: {e:#}");
+                    }
+                }
             }
             Err(e) => {
                 error!("snapshot collection failed: {e:#}");
