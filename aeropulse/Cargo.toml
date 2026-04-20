@@ -1,0 +1,16 @@
+[package]
+name        = "aeropulse"
+version     = "0.1.0"
+edition     = "2021"
+publish     = false
+
+[[bin]]
+name = "aeropulse"
+path = "src/main.rs"
+
+[dependencies]
+aerocore         = { path = "../aerocore" }
+anyhow           = { workspace = true }
+clap             = { workspace = true }
+chrono           = { workspace = true }
+tokio            = { workspace = true }

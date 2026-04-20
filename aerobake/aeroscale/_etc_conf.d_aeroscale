@@ -1,0 +1,60 @@
+# Configuration for /etc/init.d/aeroscale
+#
+# Copy this file to /etc/conf.d/aeroscale and adjust the values.
+# All settings have safe defaults; only REDIS_URL usually needs changing.
+
+# ── Redis ──────────────────────────────────────────────────────────────────────
+# Redis connection URL
+# For a local Redis: redis://127.0.0.1:6379
+# For a remote Redis with auth: redis://:password@192.168.1.10:6379
+export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.${REGION}.amazonaws.com:6379
+
+# ── AWS ────────────────────────────────────────────────────────────────────────
+: ${REGION:="${REGION}"}
+
+# Name of the Auto Scaling Group that manages the FTP backends.
+: ${ASG_NAME:="aeroftp-backend"}
+
+# AWS CloudWatch namespace for pushed metrics.
+: ${CLOUDWATCH_NAMESPACE:="Aeroscale"}
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+# Directory that holds backend-<IP>.weight files.
+# Must match the path used by keepalived (created by keepalived start_pre).
+: ${WEIGHTS_DIR:="/etc/keepalived/weights"}
+
+# ── Ports ──────────────────────────────────────────────────────────────────────
+# Port on which the aeroscale exposes its own aggregated /metrics endpoint.
+: ${METRICS_PORT:="9090"}
+
+# Port on which each FTP backend exposes its Prometheus metrics.
+: ${SCRAPE_PORT:="9090"}
+
+# ── Tuning ─────────────────────────────────────────────────────────────────────
+# Seconds between full state refreshes (snapshot + cleanup + scrape).
+: ${SNAPSHOT_INTERVAL:="30"}
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+# tracing log level filter.  Set to "debug" for detailed troubleshooting.
+: ${RUST_LOG:="info"}
+
+: ${LOGFILE:="/var/log/aeroscale.log"}
+
+# ── VRRP role detection ────────────────────────────────────────────────────────
+# The inside VIP.  aeroscale checks whether this address is assigned to a local
+# interface to determine if it is the current VRRP master.
+#   Master: full operation (cleanup, termination, CloudWatch, weight persist)
+#   Backup: weight sync from Redis, metrics scrape only (no CloudWatch)
+# Must match vip_inside configured in aeropulse / keepalived.conf.
+: ${VIP_INSIDE:="172.16.32.10"}
+
+# ── Weight state persistence ──────────────────────────────────────────────────────
+# Maximum age (seconds) of Redis weight state before it is considered stale
+# and recomputed from current lease state instead of being restored.
+# Default: 5 minutes.  Covers the time needed for a rolling upgrade.
+: ${WEIGHT_STATE_TTL:="3600"}
+
+# ── Safety ─────────────────────────────────────────────────────────────────────
+# Set to "--dry-run" to log all actions without performing any writes.
+# Useful for validating behaviour on a new deployment before going live.
+: ${EXTRA_ARGS:=""}

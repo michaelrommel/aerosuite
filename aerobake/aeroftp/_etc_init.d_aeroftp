@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+
+name="aeroftp"
+description="AeroFTP server"
+supervisor="supervise-daemon"
+
+directory="/home/aeroftp"
+
+command="/home/aeroftp/aeroftp"
+command_user="aeroftp"
+
+pidfile="/run/${RC_SVCNAME}.pid"
+
+# Logs are written here, CloudWatch agent tails this file
+output_log="/var/log/aeroftp/aeroftp.log"
+error_log="/var/log/aeroftp/aeroftp.log"
+
+depend() {
+    need net
+	after aeroslot
+	after aeroftp-routing
+    after firewall
+}
+
+start_pre() {
+    # Ensure log directory exists with correct ownership before supervise-daemon starts
+    checkpath --directory --owner aeroftp:aeroftp --mode 0755 /var/log/aeroftp
+}

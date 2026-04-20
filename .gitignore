@@ -1,0 +1,22 @@
+ # Rust build artifacts (any depth)
+target/
+
+# Cargo lock is intentionally tracked at the workspace root
+# (so don't ignore Cargo.lock)
+
+# Editor/IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+.bacon-locations
+
+# OS
+.DS_Store
+Thumbs.db
+
+#Security
+credentials.json
+
+# Interntionally omitted files
+libunftp_metadata.patch

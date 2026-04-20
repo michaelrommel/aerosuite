@@ -1,0 +1,11 @@
+# Configuration for the AeroSlot OpenRC service.
+
+# What is the network prefix for the internal segment
+export BASE_IP="172.16.32"
+
+# What is the CIDR netmask
+export BASE_MASK="26"
+
+# What is the offset inside the segment
+# The ip address range will start with this value
+export OFFSET="20"
