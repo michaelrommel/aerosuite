@@ -1,0 +1,40 @@
+[package]
+name = "aerostress"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+log = "0.4"
+pretty_env_logger = "0.5"
+suppaftp = { version = "8", features = ["tokio"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "time", "io-util", "signal"] }
+tokio-util = { version = "0.7.18", features = ["io"] }
+tokio-stream = { version = "0.1.18", features = ["time"] }
+rand = "0.10.1"
+socket2 = "0.6"
+futures = "0.3.32"
+governor = "0.10"
+async-stream = "0.3.6"
+
+[dev-dependencies]
+governor = "0.10"
+nonzero_ext = "0.3"
+socket2 = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"

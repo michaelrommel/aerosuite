@@ -1,0 +1,359 @@
+//! Configuration types and environment variable parsing for aerostress.
+//!
+//! The [`Config`] struct holds all runtime parameters. Use [`parse_config`] to
+//! populate it from environment variables, or [`ConfigBuilder`] to construct
+//! one programmatically (e.g. in tests).
+
+use anyhow::{Context, Result};
+use std::env;
+
+/// FTP load test configuration parsed from environment variables.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Config {
+    /// FTP server address (e.g., "127.0.0.1")
+    pub(crate) target: String,
+
+    /// Number of batches to send
+    pub(crate) batches: i32,
+
+    /// Parallel tasks per batch
+    pub(crate) tasks: i32,
+
+    /// Delay in seconds between batches
+    pub(crate) delay: u64,
+
+    /// Whether rate limiting is enabled
+    pub(crate) limiter: bool,
+
+    /// Test file size in megabytes
+    pub(crate) file_size_mb: u32,
+
+    /// Chunk size for streaming in kilobytes
+    pub(crate) chunk_kb: u32,
+
+    /// Rate limit interval in milliseconds (0 = no throttling)
+    pub(crate) interval: u64,
+
+    /// TCP Maximum Segment Size (MSS)
+    pub(crate) mss: u32,
+}
+
+/// Builder for constructing Config with validation.
+#[must_use = "Config must be built before use"]
+#[derive(Debug)]
+pub(crate) struct ConfigBuilder {
+    target: Option<String>,
+    batches: Option<i32>,
+    tasks: Option<i32>,
+    delay: Option<u64>,
+    limiter: Option<bool>,
+    file_size_mb: Option<u32>,
+    chunk_kb: Option<u32>,
+    interval: Option<u64>,
+    mss: Option<u32>,
+}
+
+impl ConfigBuilder {
+    /// Creates a new ConfigBuilder with default values.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the FTP server target address (e.g., "127.0.0.1").
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # use aerostress::config::ConfigBuilder;
+    /// let config = ConfigBuilder::new()
+    ///     .target("ftp.example.com")
+    ///     .build()
+    ///     .expect("valid configuration");
+    /// ```
+    pub(crate) fn target(mut self, value: impl Into<String>) -> Self {
+        self.target = Some(value.into());
+        self
+    }
+
+    /// Sets the number of batches to send.
+    pub(crate) fn batches(mut self, value: i32) -> Self {
+        self.batches = Some(value);
+        self
+    }
+
+    /// Sets the number of parallel tasks per batch.
+    pub(crate) fn tasks(mut self, value: i32) -> Self {
+        self.tasks = Some(value);
+        self
+    }
+
+    /// Sets the delay in seconds between batches.
+    pub(crate) fn delay(mut self, value: u64) -> Self {
+        self.delay = Some(value);
+        self
+    }
+
+    /// Enables or disables rate limiting.
+    pub(crate) fn limiter(mut self, value: bool) -> Self {
+        self.limiter = Some(value);
+        self
+    }
+
+    /// Sets the file size in megabytes for test files.
+    pub(crate) fn file_size_mb(mut self, value: u32) -> Self {
+        self.file_size_mb = Some(value);
+        self
+    }
+
+    /// Sets the chunk size for streaming in kilobytes.
+    pub(crate) fn chunk_kb(mut self, value: u32) -> Self {
+        self.chunk_kb = Some(value);
+        self
+    }
+
+    /// Sets the rate limit interval in milliseconds (0 = no throttling).
+    pub(crate) fn interval(mut self, value: u64) -> Self {
+        self.interval = Some(value);
+        self
+    }
+
+    /// Sets the TCP Maximum Segment Size (MSS).
+    pub(crate) fn mss(mut self, value: u32) -> Self {
+        self.mss = Some(value);
+        self
+    }
+
+    /// Builds and validates the Config.
+    ///
+    /// # Errors
+    /// Returns an error if any required field is missing from the builder.
+    pub(crate) fn build(self) -> Result<Config> {
+        Ok(Config {
+            target: self.target.context("target is required")?,
+            batches: self.batches.context("batches is required")?,
+            tasks: self.tasks.context("tasks is required")?,
+            delay: self.delay.context("delay is required")?,
+            file_size_mb: self.file_size_mb.context("file_size_mb is required")?,
+            limiter: self
+                .limiter
+                .context("limiter is required, set to false if no limiter is desired")?,
+            chunk_kb: {
+                match self.chunk_kb {
+                    Some(v) => {
+                        if self.limiter == Some(true) {
+                            if v == 0 {
+                                Err(anyhow::anyhow!(
+                                    "chunk_kb needs to be > 0 if limiter is true",
+                                ))
+                            } else {
+                                Ok(v)
+                            }
+                        } else {
+                            Ok(v)
+                        }
+                    }
+                    None => {
+                        if self.limiter == Some(true) {
+                            Err(anyhow::anyhow!("chunk_kb is required if limiter is true"))
+                        } else {
+                            Ok(0)
+                        }
+                    }
+                }?
+            },
+            interval: {
+                match self.interval {
+                    Some(v) => Ok(v),
+                    None => {
+                        if self.limiter == Some(true) {
+                            Err(anyhow::anyhow!("interval is required if limiter is true"))
+                        } else {
+                            Ok(0)
+                        }
+                    }
+                }?
+            },
+            mss: self.mss.context("mss is required")?,
+        })
+    }
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self {
+            target: Some("127.0.0.1".to_string()),
+            batches: Some(8),
+            tasks: Some(20),
+            delay: Some(10),
+            limiter: Some(false),
+            file_size_mb: Some(10),
+            chunk_kb: Some(4),
+            interval: Some(0),
+            mss: Some(1460),
+        }
+    }
+}
+
+/// Parses configuration from environment variables using the builder pattern.
+///
+/// # Errors
+/// Returns an error if any required environment variable cannot be parsed as its expected type.
+pub(crate) fn parse_config() -> Result<Config> {
+    ConfigBuilder::new()
+        .target(env::var("AEROSTRESS_TARGET").unwrap_or_else(|_| "127.0.0.1".to_string()))
+        .batches(
+            env::var("AEROSTRESS_BATCHES")
+                .unwrap_or_else(|_| "8".to_string())
+                .parse()
+                .context("AEROSTRESS_BATCHES must be a number")?,
+        )
+        .tasks(
+            env::var("AEROSTRESS_TASKS")
+                .unwrap_or_else(|_| "20".to_string())
+                .parse()
+                .context("AEROSTRESS_TASKS must be a number")?,
+        )
+        .delay(
+            env::var("AEROSTRESS_DELAY")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .context("AEROSTRESS_DELAY must be a number")?,
+        )
+        .limiter(
+            env::var("AEROSTRESS_LIMITER")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .context("AEROSTRESS_LIMITER must be a boolean")?,
+        )
+        .file_size_mb(
+            env::var("AEROSTRESS_SIZE")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .context("AEROSTRESS_SIZE must be a number")?,
+        )
+        .chunk_kb(
+            env::var("AEROSTRESS_CHUNK")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()
+                .context("AEROSTRESS_CHUNK must be a number")?,
+        )
+        .interval(
+            env::var("AEROSTRESS_INTERVAL")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .context("AEROSTRESS_INTERVAL must be a number")?,
+        )
+        .mss(
+            env::var("AEROSTRESS_MSS")
+                .unwrap_or_else(|_| "1460".to_string())
+                .parse()
+                .context("AEROSTRESS_MSS must be a number")?,
+        )
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builder_chaining() {
+        let config = ConfigBuilder::new()
+            .target("ftp.example.com".to_string())
+            .batches(10)
+            .tasks(50)
+            .delay(5)
+            .limiter(true)
+            .file_size_mb(12)
+            .chunk_kb(8)
+            .interval(100)
+            .mss(1200)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.target, "ftp.example.com");
+        assert_eq!(config.batches, 10);
+        assert_eq!(config.tasks, 50);
+        assert_eq!(config.delay, 5);
+        assert!(config.limiter);
+        assert_eq!(config.file_size_mb, 12);
+        assert_eq!(config.chunk_kb, 8);
+        assert_eq!(config.interval, 100);
+        assert_eq!(config.mss, 1200);
+    }
+
+    #[test]
+    fn test_builder_defaults() {
+        let config = ConfigBuilder::new().build().unwrap();
+
+        assert_eq!(config.target, "127.0.0.1");
+        assert_eq!(config.batches, 8);
+        assert_eq!(config.tasks, 20);
+        assert_eq!(config.delay, 10);
+        assert!(!config.limiter);
+        assert_eq!(config.file_size_mb, 10);
+        assert_eq!(config.chunk_kb, 4);
+        assert_eq!(config.interval, 0);
+        assert_eq!(config.mss, 1460);
+    }
+
+    #[test]
+    fn test_missing_required_field() {
+        // Override default with None to test validation
+        let result = ConfigBuilder {
+            target: Some("ftp.example.com".to_string()),
+            batches: Some(10),
+            tasks: Some(20),
+            delay: None,
+            limiter: Some(false),
+            file_size_mb: Some(10),
+            chunk_kb: Some(0),
+            interval: Some(0),
+            mss: Some(1460),
+        }
+        .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("is required"));
+    }
+
+    #[test]
+    fn test_missing_optional_field() {
+        // Override default with None to test validation
+        // interval is only required when a limiter is used
+        let result = ConfigBuilder {
+            target: Some("ftp.example.com".to_string()),
+            batches: Some(10),
+            tasks: Some(20),
+            delay: Some(5),
+            limiter: Some(true),
+            file_size_mb: Some(10),
+            chunk_kb: Some(4),
+            interval: None,
+            mss: Some(1460),
+        }
+        .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("is required"));
+    }
+
+    #[test]
+    fn test_wrong_value() {
+        // if limiter is used, chunk size may not be zero
+        let result = ConfigBuilder {
+            target: Some("ftp.example.com".to_string()),
+            batches: Some(10),
+            tasks: Some(20),
+            delay: Some(5),
+            limiter: Some(true),
+            file_size_mb: Some(10),
+            chunk_kb: Some(0),
+            interval: Some(0),
+            mss: Some(1460),
+        }
+        .build();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("needs to be > 0"));
+    }
+}
