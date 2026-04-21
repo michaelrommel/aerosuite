@@ -33,6 +33,9 @@ depend() {
 	# Networking must be up (Redis and CloudWatch are remote)
 	need net
 
+	# dnsmasq must be up before any AWS API call is attempted.
+	need dnsmasq
+
 	# keepalived start_pre creates /etc/keepalived/weights and the weight
 	# files; the aeroscale cannot work without them.
 	need keepalived
