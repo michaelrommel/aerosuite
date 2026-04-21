@@ -16,7 +16,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use aeroscale::{
-    cleanup,
+    cleanup::{self, CleanupState},
     listener,
     metrics::{self, MetricsStore},
     scaler::{ScaleConfig, ScalerState},
@@ -145,6 +145,20 @@ struct Args {
     /// launch a replacement automatically.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     term_decrements_capacity: bool,
+
+    /// Seconds an `InService` instance is allowed to exist without a slot
+    /// lease before it is terminated.  The termination never decrements
+    /// desired capacity (the ASG replaces the instance automatically).
+    /// Increase this value if instances need longer to boot and register.
+    #[arg(long, default_value_t = 120)]
+    orphan_grace_secs: u64,
+
+    /// Maximum number of backends allowed in `Draining` state at the same
+    /// time.  When the limit is reached the drain evaluator skips entirely.
+    /// When below the limit with a drain in progress, only a zero-session
+    /// backend may be added as an additional drain.
+    #[arg(long, default_value_t = 2)]
+    max_concurrent_draining: u32,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -303,11 +317,13 @@ async fn main() -> Result<()> {
         hysteresis_cycles:       args.hysteresis_cycles,
         scale_up_cooldown_secs:  args.scale_up_cooldown_secs,
         drain_cooldown_secs:     args.drain_cooldown_secs,
+        max_concurrent_draining: args.max_concurrent_draining,
     };
 
     // Mutable scaler state: hysteresis counters and last-action timestamps.
     // Lives outside the loop so state is preserved between cycles.
-    let mut scaler_state = ScalerState::default();
+    let mut scaler_state  = ScalerState::default();
+    let mut cleanup_state = CleanupState::default();
 
     // ── Refresh loop ──────────────────────────────────────────────────────────
 
@@ -354,6 +370,8 @@ async fn main() -> Result<()> {
                     args.dry_run,
                     is_master,
                     args.term_decrements_capacity,
+                    &mut cleanup_state,
+                    args.orphan_grace_secs,
                 )
                 .await
                 {

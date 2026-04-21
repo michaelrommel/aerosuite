@@ -104,13 +104,13 @@ pub async fn scrape_and_push(
             }
         };
 
-        // ── IPVS cross-check ──────────────────────────────────────────────────
-        // Compare ftp_sessions_total (from the backend itself) with the
-        // active-connection count reported by IPVS (from the load balancer).
-        // Only warn when the relative difference exceeds scrape_mismatch_pct,
-        // which avoids noise from normal sampling jitter on lightly-loaded
-        // backends while still surfacing real routing or counting anomalies.
-        if backend_metrics.error.is_none() {
+        // FTP uses two TCP connections per session: one control channel (port 21)
+        // and one passive data channel. IPVS therefore reports approximately
+        // twice the number of FTP sessions. We compare ftp_sessions_total * 2
+        // against ipvs_active and warn only when the relative difference exceeds
+        // scrape_mismatch_pct, avoiding noise from normal sampling jitter.
+        // Only meaningful on the master: the backup's IPVS table is always empty.
+        if backend_metrics.error.is_none() && is_master {
             let ftp_sessions = backend_metrics.samples.iter()
                 .find(|s| s.metric == "ftp_sessions_total" && s.labels.is_empty())
                 .map(|s| s.value as u32)
@@ -120,25 +120,30 @@ pub async fn scrape_and_push(
                 .map(|i| i.active_connections)
                 .unwrap_or(0);
 
-            if ftp_sessions != ipvs_active {
-                let larger = ftp_sessions.max(ipvs_active) as f64;
+            // Expected IPVS count: 2 connections per FTP session.
+            let expected_ipvs = ftp_sessions * 2;
+
+            if expected_ipvs != ipvs_active {
+                let larger = expected_ipvs.max(ipvs_active) as f64;
                 if larger > 0.0 {
-                    let diff_pct = (ftp_sessions as f64 - ipvs_active as f64).abs()
+                    let diff_pct = (expected_ipvs as f64 - ipvs_active as f64).abs()
                         / larger
                         * 100.0;
                     if diff_pct > scrape_mismatch_pct {
                         warn!(
                             slot,
-                            ip       = %b.ip,
-                            instance = live_lease.owner_instance_id.as_str(),
+                            ip            = %b.ip,
+                            instance      = live_lease.owner_instance_id.as_str(),
                             ftp_sessions,
+                            expected_ipvs,
                             ipvs_active,
-                            diff_pct = format_args!("{diff_pct:.1}%"),
+                            diff_pct      = format_args!("{diff_pct:.1}%"),
                             threshold_pct = format_args!("{scrape_mismatch_pct:.1}%"),
-                            "ftp_sessions_total vs IPVS active-connections mismatch"
+                            "ftp_sessions_total*2 vs IPVS active-connections mismatch"
                         );
                     } else {
-                        debug!(slot, ftp_sessions, ipvs_active, "IPVS cross-check OK (within {scrape_mismatch_pct:.1}%)");
+                        debug!(slot, ftp_sessions, expected_ipvs, ipvs_active,
+                               "IPVS cross-check OK (within {scrape_mismatch_pct:.1}%)");
                     }
                 }
             } else {

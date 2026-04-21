@@ -1,4 +1,4 @@
-//! assign-ip — assign or unassign a secondary private IP address on an ENI.
+//! ip — assign or unassign a secondary private IP address on an ENI.
 
 use aerocore::{
     aws_query, extract_scalar, fetch_imds_credentials, fetch_imds_path, fetch_imds_token,

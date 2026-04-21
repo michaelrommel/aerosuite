@@ -1,29 +1,36 @@
-//! attach-eni — attach or detach a pre-existing ENI on the currently running
+//! eni — attach or detach a pre-existing ENI on the currently running
 //! EC2 instance, looking the ENI up by any one of:
 //!
-//!   --eni-id      direct ENI ID         (eni-0abc1234def56789)
-//!   --name        Name tag              (tag:Name filter)
-//!   --description Description field     (description filter)
-//!   --tag         arbitrary tag k=v     (repeatable; all must match)
+//!   --eni-id      direct ENI ID              (eni-0abc1234def56789)
+//!   --name        Name tag                   (tag:Name filter)
+//!   --description Description field          (description filter)
+//!   --tag         arbitrary tag k=v          (repeatable; all must match)
+//!   --slot        aeroftp slot number        (tag:aeroftp-slot=<n> filter)
 //!
-//! Unlike `manage-eni` (which resolves ENIs via the `aeroftp-slot` tag), this
-//! tool is region-portable: operators can deploy a new region with the same
-//! naming/tagging convention and use identical call parameters.
+//! Unlike the old separate `manage-eni`, --slot is simply a convenience
+//! selector that expands to the tag:aeroftp-slot filter, keeping the CLI
+//! consistent across all ENI operations.
 //!
 //! Normal attach (ENI must already be available):
-//!   attach-eni --name "aeroftp-mgmt" --attach
+//!   eni --name "aeroftp-mgmt" --attach
+//!   eni --slot 3 --attach
 //!
 //! Normal detach:
-//!   attach-eni --name "aeroftp-mgmt" --detach
+//!   eni --name "aeroftp-mgmt" --detach
+//!   eni --slot 3 --detach
 //!
 //! Failover takeover (ENI is in-use on an unresponsive primary — steal it):
-//!   attach-eni --name "aeroftp-mgmt" --takeover
+//!   eni --name "aeroftp-mgmt" --takeover
+//!   eni --slot 3 --takeover
 //!
 //! The --takeover action force-detaches from the current holder, polls until
 //! the ENI reaches 'available', then attaches to this instance.  It is the
 //! correct action when the primary is unresponsive and cannot release the ENI
 //! gracefully.  --force is implied; --takeover-timeout controls the maximum
 //! time spent waiting for the ENI to become available (default: 30 s).
+//!
+//! Writing the resolved IP to a file after attach:
+//!   eni --slot 3 --attach --write-ip-file /var/run/slotmanager/ip
 
 use aerocore::{
     aws_query, extract_balanced, extract_scalar, fetch_imds_credentials, fetch_imds_instance_id,
@@ -35,16 +42,16 @@ use clap::{ArgGroup, Parser};
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "attach-eni")]
+#[command(name = "eni")]
 #[command(
-    about = "Attach or detach a pre-existing ENI (looked up by ID, name, description, or tag)"
+    about = "Attach or detach a pre-existing ENI (looked up by ID, name, description, tag, or slot)"
 )]
 // Exactly one of --attach / --detach / --takeover is required.
 #[command(group = ArgGroup::new("action").required(true).args(["attach", "detach", "takeover"]))]
 // Exactly one ENI selector is required.
-#[command(group = ArgGroup::new("selector").required(true).args(["eni_id", "name", "description", "tag"]))]
+#[command(group = ArgGroup::new("selector").required(true).args(["eni_id", "name", "description", "tag", "slot"]))]
 pub struct Args {
-    // ── ENI selectors (pick exactly one) ─────────────────────────────────────
+    // ── ENI selectors (pick exactly one) ────────────────────────────────────────────
     /// Locate the ENI by its ID directly (e.g. eni-0abc1234def56789)
     #[arg(long = "eni-id", value_name = "ENI_ID", group = "selector")]
     eni_id: Option<String>,
@@ -63,7 +70,11 @@ pub struct Args {
     #[arg(long, value_name = "KEY=VALUE", group = "selector")]
     tag: Vec<String>,
 
-    // ── Actions ───────────────────────────────────────────────────────────────
+    /// Locate the ENI by aeroftp slot number — shorthand for --tag aeroftp-slot=<n>.
+    #[arg(long, value_name = "N", group = "selector")]
+    slot: Option<u32>,
+
+    // ── Actions ───────────────────────────────────────────────────────────────────────────────────
     /// Attach the ENI to this instance (ENI must be in 'available' state)
     #[arg(long, group = "action")]
     attach: bool,
@@ -84,18 +95,24 @@ pub struct Args {
     #[arg(long, default_value_t = 30)]
     takeover_timeout: u64,
 
-    // ── Attach options ────────────────────────────────────────────────────────
+    // ── Attach options ─────────────────────────────────────────────────────────────────────────────
     /// Network device index when attaching (0 = primary; secondary ENIs start at 1)
     #[arg(long, default_value_t = 1)]
     device_index: u32,
 
-    // ── Detach options ────────────────────────────────────────────────────────
+    /// After a successful attach, write the ENI's primary private IP to this
+    /// file (parent directories are created if needed).
+    /// Example: --write-ip-file /var/run/slotmanager/ip
+    #[arg(long, value_name = "PATH")]
+    write_ip_file: Option<String>,
+
+    // ── Detach options ─────────────────────────────────────────────────────────────────────────────
     /// Force-detach even if the OS has not yet released the interface.
     /// Use with care — may cause data loss on in-flight connections.
     #[arg(long, default_value_t = false)]
     force: bool,
 
-    // ── Common ────────────────────────────────────────────────────────────────
+    // ── Common ──────────────────────────────────────────────────────────────────────────────────────
     /// AWS region
     #[arg(long, default_value = "eu-west-2")]
     region: String,
@@ -110,6 +127,8 @@ enum EniSelector<'a> {
     Description(&'a str),
     /// One or more `(key, value)` pairs; all must match (AND).
     Tags(Vec<(&'a str, &'a str)>),
+    /// Slot number — expands to `tag:aeroftp-slot=<n>`.
+    Slot(u32),
 }
 
 impl Args {
@@ -134,8 +153,11 @@ impl Args {
                 .collect::<Result<Vec<_>>>()?;
             return Ok(EniSelector::Tags(pairs));
         }
+        if let Some(n) = self.slot {
+            return Ok(EniSelector::Slot(n));
+        }
         // Clap's ArgGroup guarantees this is unreachable, but we need to satisfy the compiler.
-        bail!("No ENI selector provided (use --eni-id, --name, --description, or --tag)");
+        bail!("No ENI selector provided (use --eni-id, --name, --description, --tag, or --slot)");
     }
 }
 
@@ -181,6 +203,23 @@ async fn cmd_attach(
         args.device_index
     );
     println!("   Attachment ID: {attachment_id}");
+
+    // Write the resolved private IP to a file if requested.
+    if let Some(ref path) = args.write_ip_file {
+        match private_ip {
+            Some(ref ip) => {
+                let p = std::path::Path::new(path);
+                if let Some(dir) = p.parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+                }
+                std::fs::write(p, ip)
+                    .with_context(|| format!("Failed to write IP to {path}"))?;
+                println!("   Private IP {ip} written to {path}");
+            }
+            None => eprintln!("⚠️  --write-ip-file requested but no private IP was resolved for {eni_id}"),
+        }
+    }
 
     Ok(())
 }
@@ -318,6 +357,11 @@ async fn describe_eni_xml(
                 owned.push((format!("Filter.{filter_n}.Value.1"), value.to_string()));
                 filter_n += 1;
             }
+        }
+        EniSelector::Slot(n) => {
+            owned.push((format!("Filter.{filter_n}.Name"), "tag:aeroftp-slot".into()));
+            owned.push((format!("Filter.{filter_n}.Value.1"), n.to_string()));
+            filter_n += 1;
         }
     }
 

@@ -32,7 +32,7 @@ export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.eu-west-
 
 # ── Tuning ─────────────────────────────────────────────────────────────────────
 # Seconds between full state refreshes (snapshot + cleanup + scrape).
-: ${SNAPSHOT_INTERVAL:="30"}
+: ${SNAPSHOT_INTERVAL:="5"}
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 # tracing log level filter.  Set to "debug" for detailed troubleshooting.
@@ -64,34 +64,46 @@ export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.eu-west-
 
 # Average IPVS active connections per active backend above which a scale-up is
 # triggered.  Recommended: 50% of the per-backend design maximum (1500).
-: ${SCALE_UP_THRESHOLD:="750"}
+: ${SCALE_UP_THRESHOLD:="400"}
 
 # Maximum IPVS active connections allowed on the busiest remaining backend
 # after the drain candidate is removed.  If the worst-case redistribution
 # would exceed this, no drain is initiated.  Recommended: 33% of design max.
-: ${DRAIN_THRESHOLD:="500"}
+: ${DRAIN_THRESHOLD:="200"}
 
 # Number of consecutive 30-second snapshot cycles a condition must persist
 # before the action is taken.  3 cycles = ~90 seconds of sustained load.
-: ${HYSTERESIS_CYCLES:="3"}
+: ${HYSTERESIS_CYCLES:="2"}
 
 # Minimum seconds between two consecutive scale-up actions.
 # AWS typically needs 2-3 minutes to bring a new backend InService.
-: ${SCALE_UP_COOLDOWN:="120"}
+: ${SCALE_UP_COOLDOWN:="20"}
 
 # Minimum seconds between two consecutive drain initiations.
-: ${DRAIN_COOLDOWN:="300"}
+: ${DRAIN_COOLDOWN:="20"}
 
 # Percentage difference between IPVS active connections and the backend's
 # scraped ftp_sessions_total that triggers a cross-check warning.
 # Set to 0 to warn on any non-zero difference.
-: ${SCRAPE_MISMATCH_PCT:="5"}
+: ${SCRAPE_MISMATCH_PCT:="10"}
 
 # Whether TerminateInstanceInAutoScalingGroup also decrements the ASG
 # desired-capacity counter.
 # Set to "false" during testing so the ASG launches a replacement automatically.
 # Set to "true" in production to scale the fleet down as backends terminate.
 : ${TERM_DECREMENTS_CAPACITY:="true"}
+
+# Seconds an InService instance is allowed to exist without a slot lease
+# before aeroscale terminates it.  Termination never decrements desired
+# capacity so the ASG immediately launches a replacement.
+# Increase if instances need longer to boot and run aeroslot.
+: ${ORPHAN_GRACE_SECS:="180"}
+
+# Maximum number of backends allowed in Draining state simultaneously.
+# When reached the drain evaluator skips entirely. When below the limit
+# with a drain in progress, only a zero-session backend may be added;
+# loaded backends wait for the current drain to complete.
+: ${MAX_CONCURRENT_DRAINING:="2"}
 
 # ── Safety ────────────────────────────────────────────────────────────────────
 # Set to "--dry-run" to log all actions without performing any writes.

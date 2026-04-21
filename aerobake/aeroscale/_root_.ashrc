@@ -1,0 +1,4 @@
+alias ll='ls -la'
+alias vim=vi
+alias less='less -R'
+

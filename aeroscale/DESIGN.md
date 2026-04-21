@@ -121,7 +121,7 @@ The following table shows what each crate produces:
 |---|---|---|
 | `aeroscale` | `aeroscale` (daemon), `scale` (CLI) | `scale` kept for operator convenience |
 | `aeroslot` | `aeroslot` | Replaces `slot-pool-native`; openrc service renamed `aeroslot` |
-| `aeroplug` | `aeroplug` | Single consolidated binary replacing three separate ones; subcommands: `assign-ip`, `attach-eni`, `detach-eni` |
+| `aeroplug` | `aeroplug` | Single consolidated binary replacing three separate ones; subcommands: `ip`, `eni` |
 | `aeropulse` | `aeropulse` | Replaces `keepalived-config` |
 | `aerogym` | `aerogym` | Replaces `aerostress` |
 | `aws-config` | `aws-config` | Standalone helper, stays in `aeroscale` or moves to `aerocore` as a thin binary |

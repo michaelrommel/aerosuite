@@ -75,9 +75,27 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm redis curl tcpdump",
+      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm procps redis curl tcpdump",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+    ]
+  }
+
+  # root aliases, I hate this
+  provisioner "file" {
+    source      = "./_root_.profile"
+    destination = "/tmp/_root_.profile"
+  }
+  provisioner "file" {
+    source      = "./_root_.ashrc"
+    destination = "/tmp/_root_.ashrc"
+  }
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_root_.profile /root/.profile",
+      "sudo mv /tmp/_root_.ashrc /root/.ashrc",
+      "sudo chown root:root /root/.profile",
+      "sudo chown root:root /root/.ashrc",
     ]
   }
 

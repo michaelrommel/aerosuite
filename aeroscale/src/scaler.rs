@@ -18,21 +18,24 @@
 //!
 //! ## Drain algorithm
 //!
-//! The backend with the **fewest** active connections is the drain *candidate*.
-//! We estimate the worst-case load on the busiest remaining backend if the
-//! candidate were removed:
+//! **Gate:** the average sessions across all `Active` backends
+//! (`total_sessions / active_count`) must fall below `drain_threshold`.
+//! If no backend is already `Draining` and the gate holds for
+//! `hysteresis_cycles` consecutive cycles, a candidate is selected:
 //!
-//! ```text
-//! extra_per  = candidate_connections / (active_count − 1)
-//! worst_case = max_connections + extra_per
-//! ```
+//! 1. **Zero-session backend** (preferred) -- any `Active` backend carrying
+//!    no sessions is drained first; removing it costs nothing.
 //!
-//! If `worst_case < drain_threshold` for `hysteresis_cycles` consecutive
-//! cycles AND `desired > min` AND the drain cooldown has elapsed, the
-//! candidate's weight file is written to `-1` (Draining).
+//! 2. **Most-loaded backend** (fallback) -- when all backends carry sessions,
+//!    the *highest*-load backend is drained.  Setting it to `Draining`
+//!    breaks IPVS persistence: keepalived stops routing new connections
+//!    to it, so clients that were pinned by persistence are redistributed.
 //!
-//! The existing P2 cleanup pass handles the rest: once IPVS connections reach
-//! zero the backend is disabled and the instance is terminated.
+//! Only one backend is drained at a time.  If a drain is already in
+//! progress the evaluation is skipped entirely for that cycle.
+//!
+//! The P2 cleanup pass handles termination: once IPVS connections reach
+//! zero the backend is disabled and the instance terminated.
 
 use std::net::Ipv4Addr;
 use std::time::Instant;
@@ -40,9 +43,9 @@ use std::time::Instant;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use aerocore::AwsCredentials;
 use crate::cleanup::{write_weight, WEIGHT_DRAINING};
 use crate::snapshot::{BackendState, BackendStatus, SystemSnapshot};
+use aerocore::AwsCredentials;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -80,6 +83,15 @@ pub struct ScaleConfig {
     /// is slower and more disruptive than scaling up; a longer default keeps
     /// the fleet stable.  Default: 300 s.
     pub drain_cooldown_secs: u64,
+
+    /// Maximum number of backends allowed in `Draining` state simultaneously.
+    ///
+    /// - When this limit is reached the drain evaluator skips entirely.
+    /// - When below the limit but at least one drain is already in progress,
+    ///   only a zero-session backend may be added as an additional drain;
+    ///   loaded backends are left alone until the in-progress drain completes.
+    /// Default: 2.
+    pub max_concurrent_draining: u32,
 }
 
 // ── Persistent state (survives across cycles) ─────────────────────────────────
@@ -110,6 +122,22 @@ pub struct ScalerState {
     pub last_drain: Option<Instant>,
 }
 
+// ── IPVS → session normalisation ─────────────────────────────────────────────
+
+/// Convert an IPVS active-connection count to an approximate FTP session count.
+///
+/// Each FTP transfer uses **two** TCP connections tracked by IPVS:
+///   1. The control channel (port 21) — present for the full session lifetime.
+///   2. The passive data channel (ephemeral port) — present during the transfer.
+///
+/// Dividing by two converts the IPVS metric to the session count that all
+/// configured thresholds (`scale_up_threshold`, `drain_threshold`) are
+/// expressed in.
+#[inline]
+fn sessions_from_ipvs(connections: u32) -> u32 {
+    connections / 2
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Evaluate scale-up and drain conditions against the current snapshot.
@@ -117,14 +145,14 @@ pub struct ScalerState {
 /// Must only be called on the VRRP master (the caller checks `is_master`).
 /// `state` is updated in-place and carries hysteresis across cycles.
 pub async fn run(
-    snapshot:    &SystemSnapshot,
-    config:      &ScaleConfig,
-    state:       &mut ScalerState,
-    asg_name:    &str,
-    region:      &str,
-    creds:       &AwsCredentials,
+    snapshot: &SystemSnapshot,
+    config: &ScaleConfig,
+    state: &mut ScalerState,
+    asg_name: &str,
+    region: &str,
+    creds: &AwsCredentials,
     weights_dir: &str,
-    dry_run:     bool,
+    dry_run: bool,
 ) -> Result<()> {
     info!("── scaler pass ───────────────────────────────────────────────────────────");
 
@@ -134,7 +162,9 @@ pub async fn run(
     // have IPVS data participate in scale decisions.  Backends that are
     // Draining or Disabled are intentionally excluded — they are either
     // winding down or idle and would skew the averages.
-    let active: Vec<&BackendStatus> = snapshot.backends.iter()
+    let active: Vec<&BackendStatus> = snapshot
+        .backends
+        .iter()
         .filter(|b| {
             b.weight_state == BackendState::Active
                 && b.lease.as_ref().map(|l| !l.is_expired()).unwrap_or(false)
@@ -147,30 +177,41 @@ pub async fn run(
     if active_count == 0 {
         debug!("no active backends with IPVS data — skipping scaler");
         state.scale_up_cycles = 0;
-        state.drain_cycles    = 0;
+        state.drain_cycles = 0;
         state.drain_candidate = None;
         return Ok(());
     }
 
-    let total_connections: u32 = active.iter()
-        .map(|b| b.ipvs.as_ref().unwrap().active_connections)
+    let total_sessions: u32 = active
+        .iter()
+        .map(|b| sessions_from_ipvs(b.ipvs.as_ref().unwrap().active_connections))
         .sum();
-    // Use ceiling division so a single heavily-loaded backend triggers
-    // scale-up even when others are idle.
-    let avg_connections = (total_connections + active_count - 1) / active_count;
+    // Ceiling division: a single heavily-loaded backend triggers scale-up
+    // even when others are idle.
+    let avg_sessions = (total_sessions + active_count - 1) / active_count;
 
     info!(
-        active_backends      = active_count,
-        total_connections,
-        avg_connections,
-        scale_up_threshold   = config.scale_up_threshold,
-        drain_threshold      = config.drain_threshold,
-        "scaler: IPVS snapshot"
+        active_backends = active_count,
+        total_sessions,
+        avg_sessions,
+        scale_up_threshold = config.scale_up_threshold,
+        drain_threshold = config.drain_threshold,
+        "scaler: session snapshot (IPVS connections / 2)"
     );
 
     // Run both evaluations independently so a simultaneous "already maxed out
     // but also should drain" edge-case is handled gracefully.
-    evaluate_scale_up(snapshot, config, state, avg_connections, asg_name, region, creds, dry_run).await;
+    evaluate_scale_up(
+        snapshot,
+        config,
+        state,
+        avg_sessions,
+        asg_name,
+        region,
+        creds,
+        dry_run,
+    )
+    .await;
     evaluate_drain(snapshot, &active, config, state, weights_dir, dry_run).await;
 
     info!("── scaler pass done ──────────────────────────────────────────────────────");
@@ -180,14 +221,14 @@ pub async fn run(
 // ── Scale-up evaluation ───────────────────────────────────────────────────────
 
 async fn evaluate_scale_up(
-    snapshot:        &SystemSnapshot,
-    config:          &ScaleConfig,
-    state:           &mut ScalerState,
-    avg_connections: u32,
-    asg_name:        &str,
-    region:          &str,
-    creds:           &AwsCredentials,
-    dry_run:         bool,
+    snapshot: &SystemSnapshot,
+    config: &ScaleConfig,
+    state: &mut ScalerState,
+    avg_sessions: u32,
+    asg_name: &str,
+    region: &str,
+    creds: &AwsCredentials,
+    dry_run: bool,
 ) {
     let Some(group) = &snapshot.asg_group else {
         debug!("ASG group info not available — skipping scale-up check");
@@ -195,20 +236,21 @@ async fn evaluate_scale_up(
     };
 
     // ── Evaluate condition ────────────────────────────────────────────────────
-    if avg_connections > config.scale_up_threshold {
+    if avg_sessions > config.scale_up_threshold {
         state.scale_up_cycles += 1;
         info!(
-            avg_connections,
+            avg_sessions,
             threshold = config.scale_up_threshold,
-            cycles    = state.scale_up_cycles,
-            required  = config.hysteresis_cycles,
+            cycles = state.scale_up_cycles,
+            required = config.hysteresis_cycles,
             "scale-up condition met ({}/{})",
-            state.scale_up_cycles, config.hysteresis_cycles,
+            state.scale_up_cycles,
+            config.hysteresis_cycles,
         );
     } else {
         if state.scale_up_cycles > 0 {
             debug!(
-                avg_connections,
+                avg_sessions,
                 threshold = config.scale_up_threshold,
                 "scale-up condition cleared — resetting hysteresis counter"
             );
@@ -224,9 +266,9 @@ async fn evaluate_scale_up(
     // ── Guards ────────────────────────────────────────────────────────────────
     if group.desired_capacity >= group.max_size {
         warn!(
-            desired          = group.desired_capacity,
-            max              = group.max_size,
-            avg_connections,
+            desired = group.desired_capacity,
+            max = group.max_size,
+            avg_sessions,
             "scale-up condition met but ASG is at maximum capacity — cannot scale up further"
         );
         // Do NOT reset the counter: the condition is still true.  If max_size
@@ -238,10 +280,11 @@ async fn evaluate_scale_up(
         let elapsed = last.elapsed().as_secs();
         if elapsed < config.scale_up_cooldown_secs {
             info!(
-                elapsed_secs  = elapsed,
+                elapsed_secs = elapsed,
                 cooldown_secs = config.scale_up_cooldown_secs,
                 "scale-up cooldown active — waiting ({}/{}s)",
-                elapsed, config.scale_up_cooldown_secs,
+                elapsed,
+                config.scale_up_cooldown_secs,
             );
             return;
         }
@@ -253,14 +296,14 @@ async fn evaluate_scale_up(
     if dry_run {
         info!(
             "[DRY-RUN] scale-up: SetDesiredCapacity({asg_name}, {new_desired})  \
-             (avg={avg_connections} > threshold={})",
+             (avg={avg_sessions} sessions > threshold={})",
             config.scale_up_threshold,
         );
     } else {
         info!(
             asg_name,
             new_desired,
-            avg_connections,
+            avg_sessions,
             threshold = config.scale_up_threshold,
             "scaling up: SetDesiredCapacity → {new_desired}"
         );
@@ -272,164 +315,182 @@ async fn evaluate_scale_up(
     }
 
     state.scale_up_cycles = 0;
-    state.last_scale_up   = Some(Instant::now());
+    state.last_scale_up = Some(Instant::now());
 }
 
-// ── Drain evaluation ──────────────────────────────────────────────────────────
+// ── Drain evaluation ─────────────────────────────────────────────────────────
 
 async fn evaluate_drain(
-    snapshot:    &SystemSnapshot,
-    active:      &[&BackendStatus],
-    config:      &ScaleConfig,
-    state:       &mut ScalerState,
+    snapshot: &SystemSnapshot,
+    active: &[&BackendStatus],
+    config: &ScaleConfig,
+    state: &mut ScalerState,
     weights_dir: &str,
-    dry_run:     bool,
+    dry_run: bool,
 ) {
     let Some(group) = &snapshot.asg_group else {
-        debug!("ASG group info not available — skipping drain check");
+        debug!("ASG group info not available -- skipping drain check");
         return;
     };
 
     let active_count = active.len() as u32;
 
-    // Need at least 2 active backends to drain one.
+    // ── Guards ────────────────────────────────────────────────────────────────
+
     if active_count <= 1 {
         if state.drain_cycles > 0 {
-            debug!("only 1 active backend — cannot drain; resetting counter");
+            debug!("only 1 active backend -- cannot drain; resetting counter");
         }
-        state.drain_cycles    = 0;
+        state.drain_cycles = 0;
         state.drain_candidate = None;
         return;
     }
 
-    // Respect the ASG minimum: cleanup already guards individual terminations,
-    // but we should not even start draining if it would leave desired == min.
     if group.desired_capacity <= group.min_size {
         if state.drain_cycles > 0 {
             debug!(
                 desired = group.desired_capacity,
-                min     = group.min_size,
-                "desired == min — skipping drain (ASG constraint); resetting counter"
+                min = group.min_size,
+                "desired == min -- skipping drain (ASG constraint); resetting counter"
             );
         }
-        state.drain_cycles    = 0;
+        state.drain_cycles = 0;
         state.drain_candidate = None;
         return;
     }
 
-    // ── Find candidate (fewest connections) and heaviest remaining backend ────
-    let mut sorted: Vec<&BackendStatus> = active.to_vec();
-    sorted.sort_by_key(|b| b.ipvs.as_ref().unwrap().active_connections);
+    // Count backends currently in Draining state.
+    // At max_concurrent_draining: skip entirely (do not reset drain_cycles).
+    // Below max but non-zero: only allow an additional zero-session drain.
+    let draining_count = snapshot.backends.iter()
+        .filter(|b| b.weight_state == BackendState::Draining)
+        .count() as u32;
 
-    // SAFETY: active_count >= 2, so both unwraps are fine.
-    let candidate   = *sorted.first().unwrap();
-    let max_backend = *sorted.last().unwrap();
-
-    let candidate_conn = candidate.ipvs.as_ref().unwrap().active_connections;
-    let max_conn       = max_backend.ipvs.as_ref().unwrap().active_connections;
-
-    // Conservative worst-case redistribution: candidate's connections are
-    // spread evenly (ceiling) across the remaining (active_count - 1) backends.
-    let extra_per  = (candidate_conn + (active_count - 2)) / (active_count - 1);
-    let worst_case = max_conn + extra_per;
-
-    debug!(
-        candidate_ip   = %candidate.ip,
-        candidate_conn,
-        max_backend_ip = %max_backend.ip,
-        max_conn,
-        extra_per,
-        worst_case,
-        drain_threshold = config.drain_threshold,
-        "drain evaluation"
-    );
-
-    // ── Candidate stability: reset hysteresis if the cheapest backend changed ─
-    if state.drain_candidate != Some(candidate.ip) {
-        if state.drain_cycles > 0 {
-            info!(
-                old = ?state.drain_candidate,
-                new = %candidate.ip,
-                "drain candidate changed — resetting hysteresis counter"
-            );
-        }
-        state.drain_cycles    = 0;
-        state.drain_candidate = Some(candidate.ip);
+    if draining_count >= config.max_concurrent_draining {
+        debug!(
+            draining_count,
+            max = config.max_concurrent_draining,
+            "at max concurrent draining backends -- skipping"
+        );
+        // Do not reset drain_cycles: the gate may still be open.
+        return;
     }
 
-    // ── Evaluate condition ────────────────────────────────────────────────────
-    if worst_case < config.drain_threshold {
-        state.drain_cycles += 1;
-        info!(
-            candidate_ip   = %candidate.ip,
-            candidate_conn,
-            worst_case,
-            threshold = config.drain_threshold,
-            cycles    = state.drain_cycles,
-            required  = config.hysteresis_cycles,
-            "drain condition met ({}/{})",
-            state.drain_cycles, config.hysteresis_cycles,
-        );
-    } else {
+    // Sort active backends ascending by sessions (needed for candidate selection).
+    let mut sorted: Vec<&BackendStatus> = active.to_vec();
+    sorted.sort_by_key(|b| sessions_from_ipvs(b.ipvs.as_ref().unwrap().active_connections));
+
+    // ── Gate: average sessions must be below drain_threshold ─────────────────
+
+    let total_sessions: u32 = active
+        .iter()
+        .map(|b| sessions_from_ipvs(b.ipvs.as_ref().unwrap().active_connections))
+        .sum();
+    // Floor division is intentionally conservative: only drain when the
+    // average is comfortably below the limit.
+    let avg_sessions = total_sessions / active_count;
+
+    if avg_sessions >= config.drain_threshold {
         if state.drain_cycles > 0 {
             debug!(
-                worst_case,
+                avg_sessions,
                 threshold = config.drain_threshold,
-                "drain condition cleared — resetting hysteresis counter"
+                "drain gate closed -- average above threshold; resetting counter"
             );
         }
         state.drain_cycles = 0;
         return;
     }
 
+    // ── Hysteresis: gate must hold for N consecutive cycles ───────────────────
+
+    state.drain_cycles += 1;
+    info!(
+        avg_sessions,
+        threshold = config.drain_threshold,
+        active_count,
+        cycles = state.drain_cycles,
+        required = config.hysteresis_cycles,
+        "drain gate open -- average below threshold ({}/{})",
+        state.drain_cycles,
+        config.hysteresis_cycles,
+    );
+
     if state.drain_cycles < config.hysteresis_cycles {
-        return; // condition holds but hysteresis window not yet satisfied
+        return;
     }
 
     // ── Cooldown check ────────────────────────────────────────────────────────
+
     if let Some(last) = state.last_drain {
         let elapsed = last.elapsed().as_secs();
         if elapsed < config.drain_cooldown_secs {
             info!(
-                elapsed_secs  = elapsed,
+                elapsed_secs = elapsed,
                 cooldown_secs = config.drain_cooldown_secs,
-                "drain cooldown active — waiting ({}/{}s)",
-                elapsed, config.drain_cooldown_secs,
+                "drain cooldown active -- waiting ({}/{}s)",
+                elapsed,
+                config.drain_cooldown_secs,
             );
             return;
         }
     }
 
+    // ── Candidate selection ───────────────────────────────────────────────────
+
+    let least          = *sorted.first().unwrap();
+    let least_sessions = sessions_from_ipvs(least.ipvs.as_ref().unwrap().active_connections);
+
+    let (candidate, reason) = if least_sessions == 0 {
+        // Zero-session backend: free drain regardless of other draining state.
+        (least, "0-session backend -- free drain")
+    } else if draining_count == 0 {
+        // No drain in progress: drain the most-loaded backend to break
+        // IPVS persistence and redistribute its pinned clients.
+        (
+            *sorted.last().unwrap(),
+            "all backends loaded -- draining most loaded to break persistence",
+        )
+    } else {
+        // A drain is in progress and no zero-session backend is available.
+        // Wait for it to complete rather than piling a loaded backend on top.
+        debug!(
+            draining_count,
+            "drain in progress, no 0-session backend available -- waiting"
+        );
+        return;
+    };
+
+    let candidate_sessions =
+        sessions_from_ipvs(candidate.ipvs.as_ref().unwrap().active_connections);
+    let slot_label = candidate
+        .slot
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "?".into());
+
     // ── Initiate drain ────────────────────────────────────────────────────────
-    //
-    // Writing WEIGHT_DRAINING ("-1") to the weight file tells keepalived to
-    // stop sending new connections to this backend.  The P2 cleanup pass will
-    // detect Draining + 0 IPVS connections on a future cycle and issue the
-    // TerminateInstance call (with the desired-capacity decrement flag).
-    let slot_label = candidate.slot.map(|s| s.to_string()).unwrap_or_else(|| "?".into());
 
     if dry_run {
         info!(
-            "[DRY-RUN] drain: write DRAINING weight for backend {} (slot {}, {} connections)",
-            candidate.ip, slot_label, candidate_conn,
+            "[DRY-RUN] drain: write DRAINING for backend {} (slot {}, {} sessions) -- {}",
+            candidate.ip, slot_label, candidate_sessions, reason,
         );
     } else {
         info!(
-            candidate_ip   = %candidate.ip,
-            candidate_slot = %slot_label,
-            candidate_conn,
-            worst_case,
-            drain_threshold = config.drain_threshold,
+            candidate_ip       = %candidate.ip,
+            candidate_slot     = %slot_label,
+            candidate_sessions,
+            avg_sessions,
+            reason,
             "initiating drain: setting backend weight to DRAINING"
         );
         if let Err(e) = write_weight(weights_dir, candidate.ip, WEIGHT_DRAINING, dry_run).await {
             warn!(ip = %candidate.ip, "failed to write DRAINING weight: {e:#}");
-            // Do NOT reset state — attempt again next cycle.
             return;
         }
     }
 
-    state.drain_cycles    = 0;
+    state.drain_cycles = 0;
     state.drain_candidate = None;
-    state.last_drain      = Some(Instant::now());
+    state.last_drain = Some(Instant::now());
 }
