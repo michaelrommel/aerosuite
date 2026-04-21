@@ -75,9 +75,10 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm procps redis curl tcpdump",
+      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm procps redis curl tcpdump dnsmasq",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+      "sudo rc-update add dnsmasq default",
     ]
   }
 
@@ -161,6 +162,37 @@ build {
       "sudo mkdir -p /etc/logrotate.d",
       "sudo mv /tmp/_etc_logrotate.d_keepalived /etc/logrotate.d/keepalived",
       "sudo chown root:root /etc/logrotate.d/keepalived",
+    ]
+  }
+
+  # Install dnsmasq — local caching resolver to survive transient VPC DNS
+  # outages that would otherwise cause the ASG query to fail and trigger
+  # spurious backend cleanup cycles.
+  provisioner "file" {
+    source      = "./_etc_dnsmasq.conf"
+    destination = "/tmp/_etc_dnsmasq.conf"
+  }
+  provisioner "file" {
+    source      = "./_etc_dhcpcd.conf"
+    destination = "/tmp/_etc_dhcpcd.conf"
+  }
+  provisioner "file" {
+    source      = "./_etc_resolv.conf"
+    destination = "/tmp/_etc_resolv.conf"
+  }
+
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_etc_dnsmasq.conf /etc/dnsmasq.conf",
+      "sudo chown root:root /etc/dnsmasq.conf",
+      # Replace dhcpcd.conf — nohook resolv.conf prevents DHCP renewals
+      # from overwriting the static resolv.conf that points to dnsmasq.
+      "sudo mv /tmp/_etc_dhcpcd.conf /etc/dhcpcd.conf",
+      "sudo chown root:root /etc/dhcpcd.conf",
+      # Install static resolv.conf last so it wins over any dhcpcd hook
+      # that may have already run during provisioning.
+      "sudo mv /tmp/_etc_resolv.conf /etc/resolv.conf",
+      "sudo chown root:root /etc/resolv.conf",
     ]
   }
 
