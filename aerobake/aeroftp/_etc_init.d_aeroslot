@@ -118,7 +118,7 @@ attach_interface() {
 	# ── next grab the interface and attach it to this instance ──────────────────────────────────
 	if [ ! -d "/sys/class/net/eth1" ]; then
 		einfo "Attaching network interface (${slot})"
-		${AEROPLUG_BINARY} manage-eni --slot "$slot" --attach  # uses INSTANCE_ID implicitly via IMDS
+		${AEROPLUG_BINARY} eni --slot "$slot" --attach --write-ip-file /var/run/slotmanager/ip
 		einfo "Waiting for eth1 to appear..."
 		while [ ! -d "/sys/class/net/eth1" ]; do
 			sleep 1
@@ -131,7 +131,7 @@ attach_interface() {
 detach_interface() {
 	slot=$1
 	# ── detach and release the interface to the pool ──────────────────────────────────
-	${AEROPLUG_BINARY} manage-eni --slot "$slot" --detach
+	${AEROPLUG_BINARY} eni --slot "$slot" --detach
 	if [ -d "/sys/class/net/eth1" ]; then
 		einfo "Waiting for eth1 to disappear..."
 		while [ -d "/sys/class/net/eth1" ]; do

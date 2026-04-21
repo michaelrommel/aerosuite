@@ -75,9 +75,27 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 redis conntrack-tools",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 procps redis conntrack-tools",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+    ]
+  }
+
+  # root aliases, I hate this
+  provisioner "file" {
+    source      = "./_root_.profile"
+    destination = "/tmp/_root_.profile"
+  }
+  provisioner "file" {
+    source      = "./_root_.ashrc"
+    destination = "/tmp/_root_.ashrc"
+  }
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/_root_.profile /root/.profile",
+      "sudo mv /tmp/_root_.ashrc /root/.ashrc",
+      "sudo chown root:root /root/.profile",
+      "sudo chown root:root /root/.ashrc",
     ]
   }
 
@@ -244,7 +262,7 @@ build {
 
   # Stage the binary via /tmp (writable by alpine), then move it into place
   provisioner "file" {
-    source      = "../../aeroftp/target/release/aeroftp"
+    source      = "../../target/release/aeroftp"
     destination = "/tmp/aeroftp"
   }
 

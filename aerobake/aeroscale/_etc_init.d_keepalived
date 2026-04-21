@@ -67,21 +67,17 @@ fetch_imds_role() {
 # from sysfs.
 #
 # Usage:
-#   fetch_imds_eth1 TOKEN PREFIX_VAR PEER_IP_VAR
+#   fetch_imds_eth1 TOKEN PREFIX_VAR
 #
 # Outputs:
 #   PREFIX_VAR   — numeric prefix length of the inside subnet (e.g. 26)
-#   PEER_IP_VAR  — inside IP of the keepalived peer from the instance tag
 #
 # Sources:
 #   prefix   → network/interfaces/macs/<mac>/subnet-ipv4-cidr-block
 #               returns "172.16.32.0/26"; we take the part after "/"
-#   peer IP  → tags/instance/keepalived-peer-inside
-#               set on the ASG with propagate-at-launch
 fetch_imds_eth1() {
 	local _token="$1"
 	local _prefix_var="$2"
-	local _peer_var="$3"
 
 	local _mac
 	_mac=$(cat /sys/class/net/eth1/address 2>/dev/null)
@@ -100,16 +96,56 @@ fetch_imds_eth1() {
 	# "172.16.32.0/26" → "26"
 	local _prefix="${_cidr##*/}"
 
-	local _peer
-	_peer=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
-		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-peer-inside)
-	if [ -z "$_peer" ]; then
-		eerror "Failed to fetch keepalived-peer-inside tag from IMDS"
+	eval "${_prefix_var}=\"\${_prefix}\""
+}
+
+# Fetch eth2 (HA sync) network parameters from IMDS once the interface is up.
+# Must be called after 'ip link set eth2 up' so that the MAC is readable
+# from sysfs.
+#
+# Usage:
+#   fetch_imds_eth2 TOKEN PREFIX_VAR PEER_SYNC_VAR
+#
+# Outputs:
+#   PREFIX_VAR      — numeric prefix length of the sync subnet (e.g. 26)
+#   PEER_SYNC_VAR   — eth2 IP of the keepalived peer (keepalived-peer-sync tag)
+#
+# Sources:
+#   prefix    → network/interfaces/macs/<mac>/subnet-ipv4-cidr-block
+#   peer IP   → tags/instance/keepalived-peer-sync
+#               set on the ASG with propagate-at-launch
+#               (master ASG: peer = backup's eth2 IP; backup ASG: vice versa)
+fetch_imds_eth2() {
+	local _token="$1"
+	local _prefix_var="$2"
+	local _peer_sync_var="$3"
+
+	local _mac
+	_mac=$(cat /sys/class/net/eth2/address 2>/dev/null)
+	if [ -z "$_mac" ]; then
+		eerror "Cannot read eth2 MAC from sysfs — is the interface up?"
+		return 1
+	fi
+
+	local _cidr
+	_cidr=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
+		"http://169.254.169.254/latest/meta-data/network/interfaces/macs/$_mac/subnet-ipv4-cidr-block")
+	if [ -z "$_cidr" ]; then
+		eerror "Failed to fetch subnet CIDR for eth2 MAC $_mac from IMDS"
+		return 1
+	fi
+	local _prefix="${_cidr##*/}"
+
+	local _peer_sync
+	_peer_sync=$(curl -sf -H "X-aws-ec2-metadata-token: $_token" \
+		http://169.254.169.254/latest/meta-data/tags/instance/keepalived-peer-sync)
+	if [ -z "$_peer_sync" ]; then
+		eerror "Failed to fetch keepalived-peer-sync tag from IMDS"
 		return 1
 	fi
 
 	eval "${_prefix_var}=\"\${_prefix}\""
-	eval "${_peer_var}=\"\${_peer}\""
+	eval "${_peer_sync_var}=\"\${_peer_sync}\""
 }
 
 # ── Custom commands ───────────────────────────────────────────────────────────
@@ -140,15 +176,17 @@ start_pre() {
 	local TOKEN ROLE
 	fetch_imds_role TOKEN ROLE || return 1
 
+	# ── Attach inside ENI (eth1) ─────────────────────────────────────────────
 	local attach_out
-	attach_out=$(aeroplug attach-eni \
+	attach_out=$(aeroplug eni \
 		--tag aeroftp-lb=$ROLE \
 		--attach \
+		--device-index 1 \
 		--region ${REGION})
 	local attach_rc=$?
 
 	if [ ${attach_rc} -ne 0 ]; then
-		eerror "attach ENI failed (exit ${attach_rc}):"
+		eerror "attach inside ENI failed (exit ${attach_rc}):"
 		eerror "${attach_out}"
 		eend 1
 		return 1
@@ -157,6 +195,26 @@ start_pre() {
 	local IP
 	IP=$(printf '%s' "${attach_out}" | grep "ENI primary private IP:" | sed -e 's/.*IP: \(.*\)/\1/')
 
+	# ── Attach HA sync ENI (eth2) ─────────────────────────────────────────────
+	local sync_attach_out
+	sync_attach_out=$(aeroplug eni \
+		--tag aeroftp-lb-sync=$ROLE \
+		--attach \
+		--device-index 2 \
+		--region ${REGION})
+	local sync_attach_rc=$?
+
+	if [ ${sync_attach_rc} -ne 0 ]; then
+		eerror "attach sync ENI failed (exit ${sync_attach_rc}):"
+		eerror "${sync_attach_out}"
+		eend 1
+		return 1
+	fi
+
+	local SYNC_IP
+	SYNC_IP=$(printf '%s' "${sync_attach_out}" | grep "ENI primary private IP:" | sed -e 's/.*IP: \(.*\)/\1/')
+
+	# ── Bring up eth1 ────────────────────────────────────────────────────────
 	einfo "Waiting for eth1 to appear..."
 	while [ ! -d "/sys/class/net/eth1" ]; do
 		sleep 1
@@ -164,12 +222,50 @@ start_pre() {
 
 	ip link set eth1 up
 
-	# Fetch prefix length and peer IP from IMDS now that eth1 is up and its
-	# MAC is readable.  This avoids hardcoding the /26 prefix and the peer IP.
-	local PREFIX PEER_INSIDE
-	fetch_imds_eth1 "$TOKEN" PREFIX PEER_INSIDE || return 1
+	# Fetch prefix length from IMDS now that eth1 is up and its MAC is readable.
+	local PREFIX
+	fetch_imds_eth1 "$TOKEN" PREFIX || return 1
 
 	ip a add "$IP/$PREFIX" dev eth1
+
+	# ── Bring up eth2 (HA sync) ───────────────────────────────────────────────
+	einfo "Waiting for eth2 to appear..."
+	while [ ! -d "/sys/class/net/eth2" ]; do
+		sleep 1
+	done
+
+	ip link set eth2 up
+
+	# Fetch prefix length and peer sync IP from IMDS now that eth2 is up.
+	local SYNC_PREFIX PEER_SYNC
+	fetch_imds_eth2 "$TOKEN" SYNC_PREFIX PEER_SYNC || return 1
+
+	ip a add "$SYNC_IP/$SYNC_PREFIX" dev eth2
+
+	# ── Create VXLAN sync tunnel (vxlan0) ───────────────────────────────────────────
+	# keepalived's lvs_sync_daemon and ipvsadm both enforce multicast-only
+	# addresses, but AWS VPC does not support multicast.  A VXLAN
+	# point-to-point tunnel solves both constraints: the kernel VXLAN driver
+	# encapsulates outbound multicast frames from vxlan0 into unicast UDP
+	# datagrams sent to the peer's eth2 IP, then decapsulates inbound
+	# datagrams back into multicast frames.  keepalived and the IPVS sync
+	# daemon see a normal multicast interface and need no special handling.
+	einfo "Creating vxlan0 (IPVS sync tunnel: ${SYNC_IP} <-> ${PEER_SYNC} via eth2)"
+	ip link add vxlan0 type vxlan \
+		id 42 \
+		dev eth2 \
+		local "${SYNC_IP}" \
+		remote "${PEER_SYNC}" \
+		dstport 4789
+	ip link set vxlan0 up
+	# A real IP is required on vxlan0 so that the kernel can select a source
+	# address for multicast socket operations (IP_MULTICAST_IF / IP_ADD_MEMBERSHIP).
+	# 169.254.42.0/30 is not used by AWS (which only reserves specific
+	# addresses in the link-local range such as 169.254.169.254 for IMDS).
+	case "$ROLE" in
+		master) ip addr add 169.254.42.1/30 dev vxlan0 ;;
+		backup) ip addr add 169.254.42.2/30 dev vxlan0 ;;
+	esac
 
 	# Sleep before starting keepalived so eth1 is fully initialised and the
 	# unicast path to the peer is reachable.  Without this delay the VRRP dead
@@ -229,15 +325,14 @@ start_pre() {
 	# peer's VRRP advertisements are silently dropped, the dead interval
 	# expires, and this node incorrectly elects itself MASTER.
 	#
-	# Sending one outbound Protocol 112 packet to the peer creates the reverse-
-	# direction stateful entry so that inbound VRRP is allowed before keepalived
-	# opens its socket.  The payload content is irrelevant for this purpose —
-	# only the protocol number and destination IP matter for the tracking entry.
-	# Payload: Ver/Type(21), VRID(01), Prio(50), Count(01), Auth(01), Int(01), 
+	# VRRP now runs on eth2 (the dedicated HA sync interface), so we prime
+	# toward PEER_SYNC (the peer's eth2 IP).  The OS routing table will
+	# naturally send the packet out eth2 since PEER_SYNC is in eth2's subnet.
+	# Payload: Ver/Type(21), VRID(01), Prio(50), Count(01), Auth(01), Int(01),
 	#          Checksum(xxxx), VIP(c0a80101), Authentication(xxxx)
-	einfo "Priming Protocol 112 connection tracking toward ${PEER_INSIDE}..."
+	einfo "Priming Protocol 112 connection tracking toward ${PEER_SYNC} (eth2)..."
 	printf '\x21\x01\x32\x01\x01\x01\x42\x45\xc0\xa8\x01\x01\x63\x30\x66\x57\x6d\x2c\x71\x59' | \
-		socat - "IP4-DATAGRAM:${PEER_INSIDE}:112,ip-ttl=255" 2>/dev/null || true
+		socat - "IP4-DATAGRAM:${PEER_SYNC}:112,ip-ttl=255" 2>/dev/null || true
 }
 
 stop_post() {
@@ -258,13 +353,42 @@ stop_post() {
 		ip link set eth1 down
 	fi
 
-	# ── Detach the inside ENI ─────────────────────────────────────────────────
+	# ── Tear down VXLAN sync tunnel ───────────────────────────────────────────────
+	if ip link show vxlan0 >/dev/null 2>&1; then
+		einfo "Removing vxlan0"
+		ip link set vxlan0 down
+		ip link delete vxlan0
+	fi
+
+	# ── Remove the sync IP from eth2 ─────────────────────────────────────────
+	local SYNC_IP
+	SYNC_IP=$(ip -4 addr show eth2 2>/dev/null | awk '/inet / { print $2 }')
+
+	if [ -n "$SYNC_IP" ]; then
+		einfo "Removing sync IP ${SYNC_IP} from eth2"
+		ip addr del "$SYNC_IP" dev eth2
+	fi
+
+	# ── Bring eth2 down ───────────────────────────────────────────────────────
+	if [ -d "/sys/class/net/eth2" ]; then
+		einfo "Bringing eth2 down"
+		ip link set eth2 down
+	fi
+
+	# ── Detach both ENIs ─────────────────────────────────────────────────────
 	local TOKEN ROLE
 	fetch_imds_role TOKEN ROLE || return 1
 
 	ebegin "Detaching inside ENI (aeroftp-lb=${ROLE})"
-	aeroplug attach-eni \
+	aeroplug eni \
 		--tag aeroftp-lb="$ROLE" \
+		--detach \
+		--region ${REGION}
+	eend $?
+
+	ebegin "Detaching sync ENI (aeroftp-lb-sync=${ROLE})"
+	aeroplug eni \
+		--tag aeroftp-lb-sync="$ROLE" \
 		--detach \
 		--region ${REGION}
 	eend $?

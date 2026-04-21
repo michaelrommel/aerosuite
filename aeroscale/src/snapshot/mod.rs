@@ -16,8 +16,8 @@ use std::time::Instant;
 use anyhow::Result;
 use tracing::warn;
 
-use aerocore::redis_pool::now_ms;
 use crate::slot_network::SlotNetwork;
+use aerocore::redis_pool::now_ms;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -37,28 +37,28 @@ pub enum BackendState {
 impl BackendState {
     pub fn from_weight_str(s: &str) -> Self {
         match s.trim() {
-            "0"            => Self::Active,
-            "-1"           => Self::Draining,
-            "-2147483648"  => Self::Disabled,
-            other          => Self::Unknown(other.to_string()),
+            "0" => Self::Active,
+            "-1" => Self::Draining,
+            "-2147483648" => Self::Disabled,
+            other => Self::Unknown(other.to_string()),
         }
     }
 
     pub fn label(&self) -> &str {
         match self {
-            Self::Active      => "active",
-            Self::Draining    => "draining",
-            Self::Disabled    => "disabled",
-            Self::Unknown(_)  => "unknown",
+            Self::Active => "active",
+            Self::Draining => "draining",
+            Self::Disabled => "disabled",
+            Self::Unknown(_) => "unknown",
         }
     }
 
     pub fn colour(&self) -> &str {
         match self {
-            Self::Active     => "\x1b[32m",  // green
-            Self::Draining   => "\x1b[33m",  // yellow
-            Self::Disabled   => "\x1b[90m",  // dark grey
-            Self::Unknown(_) => "\x1b[31m",  // red
+            Self::Active => "\x1b[32m",     // green
+            Self::Draining => "\x1b[33m",   // yellow
+            Self::Disabled => "\x1b[90m",   // dark grey
+            Self::Unknown(_) => "\x1b[31m", // red
         }
     }
 }
@@ -66,9 +66,9 @@ impl BackendState {
 /// A currently-held Redis slot lease.
 #[derive(Debug, Clone)]
 pub struct SlotLease {
-    pub slot:              u32,
+    pub slot: u32,
     pub owner_instance_id: String,
-    pub expires_ms:        u64,
+    pub expires_ms: u64,
 }
 
 impl SlotLease {
@@ -89,10 +89,10 @@ impl SlotLease {
 /// Group-level capacity info from the Auto Scaling Group.
 #[derive(Debug, Clone)]
 pub struct AsgGroupInfo {
-    pub name:             String,
+    pub name: String,
     pub desired_capacity: i64,
-    pub min_size:         i64,
-    pub max_size:         i64,
+    pub min_size: i64,
+    pub max_size: i64,
 }
 
 impl AsgGroupInfo {
@@ -106,9 +106,9 @@ impl AsgGroupInfo {
 /// One instance currently known to the Auto Scaling Group.
 #[derive(Debug, Clone)]
 pub struct AsgInstance {
-    pub instance_id:     String,
+    pub instance_id: String,
     pub lifecycle_state: String,
-    pub health_status:   String,
+    pub health_status: String,
 }
 
 impl AsgInstance {
@@ -120,23 +120,23 @@ impl AsgInstance {
 /// Real-server state as reported by IPVS.
 #[derive(Debug, Clone)]
 pub struct IpvsBackend {
-    pub ip:                   Ipv4Addr,
-    pub active_connections:   u32,
+    pub ip: Ipv4Addr,
+    pub active_connections: u32,
     pub inactive_connections: u32,
 }
 
 /// Per-backend view: weight file + IPVS data + Redis lease, all joined on IP.
 #[derive(Debug, Clone)]
 pub struct BackendStatus {
-    pub ip:           Ipv4Addr,
+    pub ip: Ipv4Addr,
     /// Slot number derived from the IP via `SlotNetwork::slot_for_ip()`.
     /// Always `Some` for IPs within the slot range; `None` for stray files.
-    pub slot:         Option<u32>,
+    pub slot: Option<u32>,
     pub weight_state: BackendState,
     /// IPVS real-server entry for this IP, if present.
-    pub ipvs:         Option<IpvsBackend>,
+    pub ipvs: Option<IpvsBackend>,
     /// The Redis lease for this slot, if one exists.
-    pub lease:        Option<SlotLease>,
+    pub lease: Option<SlotLease>,
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -144,17 +144,17 @@ pub struct BackendStatus {
 /// Complete point-in-time view of all subsystems.
 pub struct SystemSnapshot {
     /// One entry per weight file, with slot, IPVS and lease merged in.
-    pub backends:     Vec<BackendStatus>,
+    pub backends: Vec<BackendStatus>,
     /// All active Redis slot leases (full list, for cross-checks).
-    pub leases:       Vec<SlotLease>,
+    pub leases: Vec<SlotLease>,
     /// All instances currently in the ASG (any lifecycle state).
-    pub asg:          Vec<AsgInstance>,
+    pub asg: Vec<AsgInstance>,
     /// Group-level capacity constraints (desired / min / max).
-    pub asg_group:    Option<AsgGroupInfo>,
+    pub asg_group: Option<AsgGroupInfo>,
     /// Raw IPVS real-server list.
-    pub ipvs:         Vec<IpvsBackend>,
+    pub ipvs: Vec<IpvsBackend>,
     /// When this snapshot was taken.
-    pub taken_at:     Instant,
+    pub taken_at: Instant,
     /// Human-readable UTC timestamp.
     pub taken_at_utc: String,
 }
@@ -166,26 +166,32 @@ impl SystemSnapshot {
     /// ASG and IPVS failures degrade gracefully (empty list + warning).
     /// Slot→IP mapping is computed directly via `slot_network` — no EC2 call.
     pub async fn collect(
-        weights_dir:  &str,
-        region:       &str,
-        asg_name:     &str,
-        creds:        &aerocore::AwsCredentials,
-        redis_con:    &mut redis::aio::MultiplexedConnection,
+        weights_dir: &str,
+        region: &str,
+        asg_name: &str,
+        creds: &aerocore::AwsCredentials,
+        redis_con: &mut redis::aio::MultiplexedConnection,
         slot_network: &SlotNetwork,
     ) -> Result<Self> {
         // ── Mandatory ─────────────────────────────────────────────────────────
         let weight_entries = weights::read_all(weights_dir).await?;
-        let lease_list     = leases::read_all(redis_con).await?;
+        let lease_list = leases::read_all(redis_con).await?;
 
         // ── Best-effort ───────────────────────────────────────────────────────
         let (asg_group, asg_instances) = match asg::read_all(region, asg_name, creds).await {
-            Ok(v)  => v,
-            Err(e) => { warn!("ASG query failed: {e:#}"); (None, Vec::new()) }
+            Ok(v) => v,
+            Err(e) => {
+                warn!("ASG query failed: {e:#}");
+                (None, Vec::new())
+            }
         };
 
         let ipvs_backends = match ipvs::read_all().await {
-            Ok(v)  => v,
-            Err(e) => { warn!("IPVS read failed: {e:#}"); Vec::new() }
+            Ok(v) => v,
+            Err(e) => {
+                warn!("IPVS read failed: {e:#}");
+                Vec::new()
+            }
         };
 
         // ── Build slot→lease map using the deterministic formula ───────────────
@@ -200,10 +206,16 @@ impl SystemSnapshot {
         let backends = weight_entries
             .into_iter()
             .map(|w| {
-                let slot  = slot_network.slot_for_ip(w.ip);
-                let ipvs  = ipvs_backends.iter().find(|i| i.ip == w.ip).cloned();
+                let slot = slot_network.slot_for_ip(w.ip);
+                let ipvs = ipvs_backends.iter().find(|i| i.ip == w.ip).cloned();
                 let lease = ip_to_lease.get(&w.ip).cloned();
-                BackendStatus { ip: w.ip, slot, weight_state: w.state, ipvs, lease }
+                BackendStatus {
+                    ip: w.ip,
+                    slot,
+                    weight_state: w.state,
+                    ipvs,
+                    lease,
+                }
             })
             .collect();
 
@@ -213,7 +225,7 @@ impl SystemSnapshot {
             asg: asg_instances,
             asg_group,
             ipvs: ipvs_backends,
-            taken_at:     Instant::now(),
+            taken_at: Instant::now(),
             taken_at_utc: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         })
     }
@@ -222,17 +234,20 @@ impl SystemSnapshot {
 
     pub fn print(&self) {
         let reset = "\x1b[0m";
-        let bold  = "\x1b[1m";
-        let dim   = "\x1b[2m";
-        let bar   = "━".repeat(90);
-        let sep   = "─".repeat(90);
+        let bold = "\x1b[1m";
+        let dim = "\x1b[2m";
+        let bar = "=".repeat(88);
+        let sep = "-".repeat(85);
 
         println!("\n{bold}{bar}{reset}");
         println!(" System Snapshot  {dim}{}{reset}", self.taken_at_utc);
         println!("{bold}{bar}{reset}");
 
         // ── Backends ──────────────────────────────────────────────────────────
-        println!("\n {bold}Backends{reset}  ({} weight file(s))\n", self.backends.len());
+        println!(
+            "\n {bold}Backends{reset}  ({} weight file(s))\n",
+            self.backends.len()
+        );
         if self.backends.is_empty() {
             println!("   (none — check --weights-dir)");
         } else {
@@ -244,23 +259,39 @@ impl SystemSnapshot {
             for b in &self.backends {
                 let colour = b.weight_state.colour();
                 let slot_s = b.slot.map(|s| s.to_string()).unwrap_or_else(|| "-".into());
-                let owner  = b.lease.as_ref()
+                let owner = b
+                    .lease
+                    .as_ref()
                     .map(|l| l.owner_instance_id.as_str())
                     .unwrap_or("-");
-                let (active, inactive) = b.ipvs.as_ref()
-                    .map(|i| (i.active_connections.to_string(), i.inactive_connections.to_string()))
+                let (active, inactive) = b
+                    .ipvs
+                    .as_ref()
+                    .map(|i| {
+                        (
+                            i.active_connections.to_string(),
+                            i.inactive_connections.to_string(),
+                        )
+                    })
                     .unwrap_or_else(|| ("-".into(), "-".into()));
 
                 println!(
                     "   {:<18} {colour}{:<12}{reset} {:<6} {:<26} {:>8}  {:>8}",
-                    b.ip.to_string(), b.weight_state.label(),
-                    slot_s, owner, active, inactive,
+                    b.ip.to_string(),
+                    b.weight_state.label(),
+                    slot_s,
+                    owner,
+                    active,
+                    inactive,
                 );
             }
         }
 
         // ── Redis leases ───────────────────────────────────────────────────────
-        println!("\n {bold}Redis Leases{reset}  ({} slot(s) leased)\n", self.leases.len());
+        println!(
+            "\n {bold}Redis Leases{reset}  ({} slot(s) leased)\n",
+            self.leases.len()
+        );
         if self.leases.is_empty() {
             println!("   (none)");
         } else {
@@ -277,21 +308,35 @@ impl SystemSnapshot {
                 };
                 println!(
                     "   {:<6} {:<26} {:>9.1} s  {}",
-                    l.slot, l.owner_instance_id, l.remaining_secs(), status,
+                    l.slot,
+                    l.owner_instance_id,
+                    l.remaining_secs(),
+                    status,
                 );
             }
         }
 
         // ── ASG ────────────────────────────────────────────────────────────────
         let in_service = self.asg.iter().filter(|i| i.is_in_service()).count();
-        let capacity_line = self.asg_group.as_ref().map(|g| {
-            let warn = if g.would_violate_min() { " \x1b[33m⚠ desired=min\x1b[0m" } else { "" };
-            format!("  desired={}  min={}  max={}{}",
-                g.desired_capacity, g.min_size, g.max_size, warn)
-        }).unwrap_or_default();
+        let capacity_line = self
+            .asg_group
+            .as_ref()
+            .map(|g| {
+                let warn = if g.would_violate_min() {
+                    " \x1b[33m[!] desired=min\x1b[0m"
+                } else {
+                    ""
+                };
+                format!(
+                    "  desired={}  min={}  max={}{}",
+                    g.desired_capacity, g.min_size, g.max_size, warn
+                )
+            })
+            .unwrap_or_default();
         println!(
             "\n {bold}ASG Instances{reset}  ({} total, {} InService){capacity_line}\n",
-            self.asg.len(), in_service
+            self.asg.len(),
+            in_service
         );
         if self.asg.is_empty() {
             println!("   (none — ASG may be empty or query failed)");
@@ -302,7 +347,11 @@ impl SystemSnapshot {
             );
             println!("   {dim}{sep}{reset}");
             for inst in &self.asg {
-                let colour = if inst.is_in_service() { "\x1b[32m" } else { "\x1b[33m" };
+                let colour = if inst.is_in_service() {
+                    "\x1b[32m"
+                } else {
+                    "\x1b[33m"
+                };
                 println!(
                     "   {:<26} {:<14} {colour}{}{reset}",
                     inst.instance_id, inst.health_status, inst.lifecycle_state,
@@ -311,18 +360,29 @@ impl SystemSnapshot {
         }
 
         // ── Summary ────────────────────────────────────────────────────────────
-        let active_count   = self.backends.iter().filter(|b| b.weight_state == BackendState::Active).count();
-        let draining_count = self.backends.iter().filter(|b| b.weight_state == BackendState::Draining).count();
-        let disabled_count = self.backends.len().saturating_sub(active_count + draining_count);
+        let active_count = self
+            .backends
+            .iter()
+            .filter(|b| b.weight_state == BackendState::Active)
+            .count();
+        let draining_count = self
+            .backends
+            .iter()
+            .filter(|b| b.weight_state == BackendState::Draining)
+            .count();
+        let disabled_count = self
+            .backends
+            .len()
+            .saturating_sub(active_count + draining_count);
         let total_conn: u32 = self.ipvs.iter().map(|i| i.active_connections).sum();
 
         println!("\n{bold}{bar}{reset}");
         println!(
             " {bold}Summary:{reset}  \
              \x1b[32m{active_count} active\x1b[0m  \
-             \x1b[33m{draining_count} draining\x1b[0m  \
+             \x1b[33m{draining_count} drains\x1b[0m  \
              \x1b[90m{disabled_count} disabled\x1b[0m  \
-             │  {leases} lease(s)  │  {in_service} InService  │  {total_conn} active conn(s)",
+             |  {leases} leases  |  {in_service} inservice  |  {total_conn} conns",
             leases = self.leases.len(),
         );
         println!("{bold}{bar}{reset}\n");

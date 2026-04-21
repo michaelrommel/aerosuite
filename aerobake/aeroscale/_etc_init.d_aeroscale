@@ -21,6 +21,8 @@ description="AeroFTP aeroscale — backend management and autoscaling daemon"
 : ${DRAIN_COOLDOWN:="300"}
 : ${SCRAPE_MISMATCH_PCT:="5"}
 : ${TERM_DECREMENTS_CAPACITY:="true"}
+: ${ORPHAN_GRACE_SECS:="120"}
+: ${MAX_CONCURRENT_DRAINING:="2"}
 : ${RUST_LOG:="info"}
 : ${LOGFILE:="/var/log/aeroscale.log"}
 : ${EXTRA_ARGS:=""}
@@ -70,6 +72,8 @@ start() {
 			--drain-cooldown-secs  "${DRAIN_COOLDOWN}"      \
 			--scrape-mismatch-pct  "${SCRAPE_MISMATCH_PCT}" \
 			--term-decrements-capacity "${TERM_DECREMENTS_CAPACITY}" \
+			--orphan-grace-secs        "${ORPHAN_GRACE_SECS}"          \
+			--max-concurrent-draining  "${MAX_CONCURRENT_DRAINING}"    \
 			${EXTRA_ARGS}
 
 	eend $?

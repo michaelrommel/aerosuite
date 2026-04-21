@@ -41,6 +41,19 @@ table inet filter {
 		iifname @allowed_interfaces accept
 		udp dport @allowed_udp_dports accept
 		tcp dport @allowed_tcp_dports accept
+
+		# ── HA sync interface (eth2) ─────────────────────────────────────────────
+		# eth2 is a dedicated private subnet shared only by the two LB nodes.
+		# Trust the whole interface rather than enumerating peer IPs.
+		# VXLAN (UDP 4789) carries the IPVS connection sync tunnel.
+		# Protocol 112 is VRRP.
+		iifname "eth2" udp dport 4789 accept
+		iifname "eth2" meta l4proto 112 accept
+
+		# ── VXLAN overlay (vxlan0) ───────────────────────────────────────────────
+		# vxlan0 is a point-to-point tunnel between the two LB nodes.
+		# Only the IPVS sync daemon (UDP 8848 multicast) uses this interface.
+		iifname "vxlan0" accept
 	}
 
 	# base-chain for traffic to this host

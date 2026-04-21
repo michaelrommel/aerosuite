@@ -6,14 +6,25 @@
 //!
 //! ## Section 2.1 — Active leases
 //! For each lease, cross-reference the ASG and backend state, then act.
+//! `asg_ids` is built from **InService-only** instances — `Terminating` or
+//! `Pending` instances are excluded so their slots are released promptly.
 //!
 //! ## Section 2.2 — ASG instances without leases
-//! Any InService instance that holds no lease is an orphan; terminate it.
+//! Any `InService` instance that holds no lease is an *orphan* — it has either
+//! just booted (and hasn't claimed a slot yet) or its registration failed.
+//! A per-instance grace period is observed before taking action so that a
+//! freshly launched instance has time to run aeroslot and claim a slot.
+//! When the grace period expires the instance is terminated **without**
+//! decrementing the ASG desired capacity so that a replacement is launched
+//! automatically.
 //!
 //! ## Section 2.3 — Backends without leases
 //! Weight files that have no matching lease indicate a crashed backend.
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 use tracing::{debug, error, info, warn};
@@ -27,25 +38,41 @@ pub const WEIGHT_ACTIVE:   &str = "0";
 pub const WEIGHT_DRAINING: &str = "-1";
 pub const WEIGHT_DISABLED: &str = "-2147483648";
 
+// ── Persistent cleanup state ──────────────────────────────────────────────────
+
+/// Mutable cleanup state that must survive between `run()` calls.
+///
+/// Initialise once with `CleanupState::default()` before the main loop.
+#[derive(Debug, Default)]
+pub struct CleanupState {
+    /// The first time each `InService` instance was observed without a slot
+    /// lease.  Used to implement the orphan grace period (§2.2).
+    /// Entries are evicted when the instance acquires a lease or leaves the
+    /// `InService` lifecycle state.
+    pub orphan_first_seen: HashMap<String, Instant>,
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Run all three cleanup sections against `snapshot`.
 ///
-/// On the VRRP backup this is a no-op: the backup maintains its weight files
-/// by syncing from Redis rather than running independent cleanup logic.
+/// `state` carries per-cycle observations (orphan grace-period timers) across
+/// calls and must not be recreated each cycle.
 ///
-/// `term_decrements_capacity` controls whether `TerminateInstance` asks AWS
-/// to also decrement the ASG desired-capacity counter.  Set to `false` during
-/// testing so the ASG immediately launches a replacement; `true` in production.
+/// `orphan_grace_secs` — how long an `InService` instance is allowed to exist
+/// without a slot lease before it is terminated.  The termination always uses
+/// `decrement=false` so the ASG replaces the instance automatically.
 pub async fn run(
-    snapshot:                &SystemSnapshot,
-    weights_dir:             &str,
-    region:                  &str,
-    creds:                   &AwsCredentials,
-    redis_con:               &mut MultiplexedConnection,
-    dry_run:                 bool,
-    is_master:               bool,
+    snapshot:                 &SystemSnapshot,
+    weights_dir:              &str,
+    region:                   &str,
+    creds:                    &AwsCredentials,
+    redis_con:                &mut MultiplexedConnection,
+    dry_run:                  bool,
+    is_master:                bool,
     term_decrements_capacity: bool,
+    state:                    &mut CleanupState,
+    orphan_grace_secs:        u64,
 ) -> Result<()> {
     if !is_master {
         debug!("backup mode — skipping cleanup pass");
@@ -54,7 +81,7 @@ pub async fn run(
     info!("── cleanup pass ──────────────────────────────────────────────────────────");
 
     section_21_active_leases(snapshot, weights_dir, region, creds, redis_con, dry_run, term_decrements_capacity).await;
-    section_22_orphaned_asg_instances(snapshot, region, creds, dry_run, term_decrements_capacity).await;
+    section_22_orphaned_asg_instances(snapshot, state, region, creds, dry_run, orphan_grace_secs).await;
     section_23_backends_without_leases(snapshot, weights_dir, dry_run).await;
 
     info!("── cleanup pass done ─────────────────────────────────────────────────────");
@@ -72,8 +99,57 @@ async fn section_21_active_leases(
     dry_run:                 bool,
     term_decrements_capacity: bool,
 ) {
+    // Only InService instances are considered valid lease owners.
+    // Terminating instances have their slots released (same as if they left
+    // the ASG), preventing a leased slot from being held open while AWS
+    // slowly completes the termination.
     let asg_ids: std::collections::HashSet<&str> =
-        snapshot.asg.iter().map(|i| i.instance_id.as_str()).collect();
+        snapshot.asg.iter()
+            .filter(|i| i.is_in_service())
+            .map(|i| i.instance_id.as_str())
+            .collect();
+
+    // ── Sanity guard: trust ASG data only when it looks plausible ─────────────
+    //
+    // If the ASG query failed (DNS glitch, transient API error, …) the
+    // snapshot arrives with asg_group=None and zero instances.  Running
+    // cleanup against that empty view would mark every lease owner as
+    // "no longer in the ASG", release all 20 slots, and write
+    // -2147483648 to every weight file — a total outage from a single
+    // dropped DNS packet, as observed in production on 2026-04-21.
+    //
+    // Two conditions independently trigger the guard:
+    //
+    //  1. asg_group is None  — the API call returned an error; the instance
+    //     list is definitively unreliable.
+    //
+    //  2. Zero InService instances but active leases exist  — implausible in
+    //     normal operation (there is always at least one InService backend).
+    //     Catches the case where the query "succeeded" but returned an empty
+    //     or all-Terminating list due to a partial API response.
+    //
+    // In both cases we log at ERROR level (this needs operator attention if
+    // it persists) and skip the section entirely.  The next cycle will retry
+    // with a fresh ASG query.
+    if snapshot.asg_group.is_none() {
+        error!(
+            leases = snapshot.leases.len(),
+            "ASG query failed this cycle (asg_group is None) — \
+             skipping section 2.1 to avoid releasing leases against stale data. \
+             Will retry next cycle."
+        );
+        return;
+    }
+    if asg_ids.is_empty() && !snapshot.leases.is_empty() {
+        error!(
+            leases = snapshot.leases.len(),
+            "ASG returned 0 InService instances but {} active lease(s) exist — \
+             implausible result (DNS glitch? transient API error?). \
+             Skipping section 2.1. Will retry next cycle.",
+            snapshot.leases.len()
+        );
+        return;
+    }
 
     for lease in &snapshot.leases {
         let result = handle_lease(
@@ -208,26 +284,77 @@ async fn handle_lease(
 // ── 2.2 — Orphaned ASG instances ─────────────────────────────────────────────
 
 async fn section_22_orphaned_asg_instances(
-    snapshot:                &SystemSnapshot,
-    region:                  &str,
-    creds:                   &AwsCredentials,
-    dry_run:                 bool,
-    term_decrements_capacity: bool,
+    snapshot:          &SystemSnapshot,
+    state:             &mut CleanupState,
+    region:            &str,
+    creds:             &AwsCredentials,
+    dry_run:           bool,
+    orphan_grace_secs: u64,
 ) {
     let leased_owners: std::collections::HashSet<&str> =
         snapshot.leases.iter().map(|l| l.owner_instance_id.as_str()).collect();
 
+    // Track which instance IDs are still orphaned this cycle so we can evict
+    // instances that have since been leased or left InService from the map.
+    let mut still_orphaned: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for inst in snapshot.asg.iter().filter(|i| i.is_in_service()) {
-        if !leased_owners.contains(inst.instance_id.as_str()) {
-            error!(
-                instance_id = %inst.instance_id,
-                "InService ASG instance has no slot lease — possible ENI leak; terminating"
+        if leased_owners.contains(inst.instance_id.as_str()) {
+            // Instance has a lease this cycle — remove any stale grace entry.
+            state.orphan_first_seen.remove(&inst.instance_id);
+            continue;
+        }
+
+        // InService but no lease.
+        let elapsed = match state.orphan_first_seen.get(&inst.instance_id) {
+            Some(first_seen) => first_seen.elapsed().as_secs(),
+            None => {
+                // First observation — start the grace period clock.
+                info!(
+                    instance_id = %inst.instance_id,
+                    grace_secs  = orphan_grace_secs,
+                    "InService instance has no slot lease — starting grace period"
+                );
+                state.orphan_first_seen
+                    .insert(inst.instance_id.clone(), Instant::now());
+                still_orphaned.insert(inst.instance_id.clone());
+                continue;  // give at least one full cycle before acting
+            }
+        };
+
+        still_orphaned.insert(inst.instance_id.clone());
+
+        if elapsed < orphan_grace_secs {
+            info!(
+                instance_id  = %inst.instance_id,
+                elapsed_secs = elapsed,
+                grace_secs   = orphan_grace_secs,
+                "InService instance without lease — waiting ({elapsed}/{orphan_grace_secs}s)"
             );
-            if let Err(e) = terminate_instance(&inst.instance_id, region, creds, dry_run, term_decrements_capacity).await {
+        } else {
+            // Grace period expired — this instance failed to register.
+            // Terminate WITHOUT decrementing desired capacity so the ASG
+            // immediately launches a replacement.
+            error!(
+                instance_id  = %inst.instance_id,
+                elapsed_secs = elapsed,
+                grace_secs   = orphan_grace_secs,
+                "InService instance has no slot lease after grace period —                  possible registration failure; terminating                  (capacity NOT decremented — ASG will replace automatically)"
+            );
+            state.orphan_first_seen.remove(&inst.instance_id);
+            still_orphaned.remove(&inst.instance_id);
+            if let Err(e) = terminate_instance(
+                &inst.instance_id, region, creds, dry_run,
+                /*decrement=*/ false,
+            ).await {
                 error!(instance_id = %inst.instance_id, "terminate failed: {e:#}");
             }
         }
     }
+
+    // Evict any instance that was previously orphaned but is no longer
+    // InService (e.g. it transitioned to Terminating or Terminated).
+    state.orphan_first_seen.retain(|id, _| still_orphaned.contains(id.as_str()));
 }
 
 // ── 2.3 — Backends without leases ────────────────────────────────────────────

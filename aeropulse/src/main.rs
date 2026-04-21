@@ -39,7 +39,7 @@
 //!                                        stubs with instructions.
 //!
 //!   /etc/keepalived/notify-master.sh     Called on MASTER transition; runs
-//!                                        aeroplug assign-ip for both VIPs.
+//!                                        aeroplug ip for both VIPs.
 //!
 //!   /etc/keepalived/notify-backup.sh     Called on BACKUP transition (no-op;
 //!                                        the new master steals the IPs).
@@ -135,6 +135,19 @@ struct Args {
     #[arg(long, default_value = "eth1")]
     iface_inside: String,
 
+    /// OS interface name for the HA sync ENI (device index 2).
+    /// Carries both VRRP heartbeats and the IPVS connection sync daemon,
+    /// keeping all HA control traffic off the data-plane interfaces.
+    #[arg(long, default_value = "eth2")]
+    iface_sync: String,
+
+    /// OS interface name for the VXLAN overlay used by the IPVS sync daemon.
+    /// A point-to-point VXLAN tunnel over eth2 encapsulates the sync daemon's
+    /// multicast traffic as unicast UDP, working around AWS VPC's lack of
+    /// multicast support while satisfying keepalived's multicast-only restriction.
+    #[arg(long, default_value = "vxlan0")]
+    iface_vxlan: String,
+
     // ── VRRP tuning ───────────────────────────────────────────────────────────
     /// VRRP virtual_router_id for the outside instance (1–255, unique per subnet)
     #[arg(long, default_value_t = 51)]
@@ -147,6 +160,15 @@ struct Args {
     /// VRRP advertisement interval in seconds
     #[arg(long, default_value_t = 1)]
     advert_int: u8,
+
+    /// Sync daemon identifier (1–255).  Must be the same on both nodes.
+    /// Allows multiple sync daemon instances on the same subnet if needed.
+    #[arg(long, default_value_t = 1)]
+    lvs_sync_id: u8,
+
+    /// UDP port used by the IPVS connection sync daemon
+    #[arg(long, default_value_t = 8848)]
+    lvs_sync_port: u16,
 
     /// Number of consecutive missed advertisements before declaring the master
     /// absent and transitioning from BACKUP to MASTER.
@@ -274,8 +296,11 @@ struct InstanceData {
     role: Role,
     outside: IfaceInfo,
     inside: IfaceInfo,
-    /// Peer's fixed eth1 IP, read from the keepalived-peer-inside IMDS tag.
-    peer_inside_ip: String,
+    /// Peer's eth2 IP, read from the keepalived-peer-sync IMDS tag.
+    /// Used for both VRRP unicast heartbeats and lvs_sync_daemon.
+    peer_sync_ip: String,
+    /// HA sync interface (eth2) info.
+    sync: IfaceInfo,
     /// Outside VIP — from required IMDS tag `aeroftp-vip-outside`.
     vip_outside: String,
     /// Inside VIP — from required IMDS tag `aeroftp-vip-inside`.
@@ -338,7 +363,8 @@ async fn main() -> Result<()> {
     println!("  Role      : {}", data.role.as_str());
     println!("  eth0      : {}  ({})", data.outside.primary_ip, data.outside.eni_id);
     println!("  eth1      : {}  ({})", data.inside.primary_ip, data.inside.eni_id);
-    println!("  Peer eth1 : {} (inside unicast peer)", data.peer_inside_ip);
+    println!("  eth2      : {}  ({})  [HA sync]", data.sync.primary_ip, data.sync.eni_id);
+    println!("  Peer eth2 : {} (VRRP unicast + lvs_sync_daemon peer)", data.peer_sync_ip);
     println!("  VIP out   : {} (aeroftp-vip-outside)", data.vip_outside);
     println!("  VIP in    : {} (aeroftp-vip-inside)", data.vip_inside);
     println!("  Slots     : {} × ({} – {})",
@@ -350,7 +376,7 @@ async fn main() -> Result<()> {
     let vrrp_conf        = render_vrrp_conf(&args, &data);
     let backends_conf    = render_backends_conf(&args, &data);
     let notify_master    = render_notify_master(&args, &data);
-    let notify_backup    = render_notify_backup();
+    let notify_backup    = render_notify_backup(&args, &data);
     let chk_backends     = render_chk_backends(&args);
     let chk_forward_path = render_chk_forward_path(&args, &data);
 
@@ -405,19 +431,23 @@ async fn resolve_instance_data() -> Result<InstanceData> {
     let mut ifaces = fetch_all_interfaces(&token).await?;
     ifaces.sort_by_key(|i| i.device_number);
 
-    if ifaces.len() < 2 {
+    if ifaces.len() < 3 {
         bail!(
-            "Expected at least 2 network interfaces (eth0 + eth1), \
-             found {}. Is the inside ENI attached?",
+            "Expected at least 3 network interfaces (eth0 + eth1 + eth2), \
+             found {}. Are both the inside and sync ENIs attached?",
             ifaces.len()
         );
     }
 
     let outside = ifaces.remove(0);
-    let inside = ifaces.remove(0);
+    let inside  = ifaces.remove(0);
+    let sync    = ifaces.remove(0);
 
-    // Peer inside IP is fixed and stored as an instance tag — no API discovery needed.
-    let peer_inside_ip = fetch_imds_tag(&token, "keepalived-peer-inside").await?;
+    // Peer sync IP is the fixed eth2 IP of the peer, stored as an instance tag.
+    // ASG tag name: keepalived-peer-sync
+    //   master ASG value: backup's eth2 IP  (e.g. 172.16.32.136)
+    //   backup ASG value: master's eth2 IP  (e.g. 172.16.32.135)
+    let peer_sync_ip = fetch_imds_tag(&token, "keepalived-peer-sync").await?;
 
     // ── VIPs: required IMDS instance tags ───────────────────────────────────
     // Set once in the EC2 launch template with "Resource types: Instances".
@@ -460,7 +490,8 @@ async fn resolve_instance_data() -> Result<InstanceData> {
         role,
         outside,
         inside,
-        peer_inside_ip,
+        sync,
+        peer_sync_ip,
         vip_outside,
         vip_inside,
         slot_network,
@@ -643,9 +674,9 @@ fn render_vrrp_conf(args: &Args, data: &InstanceData) -> String {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
 
     let vrrp_scripts_block = render_vrrp_scripts_definitions(args);
-    let track_iface_block = render_track_interface_block(args);
+    let lvs_sync_block     = render_lvs_sync_daemon(args);
+    let track_iface_block  = render_track_interface_block(args);
     let track_scripts_block = render_track_scripts_references(args);
-
     format!(
         r#"# ── VRRP — generated by keepalived-config ────────────────────────────────────
 # Instance  : {instance_id}
@@ -656,7 +687,13 @@ fn render_vrrp_conf(args: &Args, data: &InstanceData) -> String {
 #
 # Add to /etc/keepalived/keepalived.conf:
 #   include "{out}"
+#
+# Interface roles:
+#   eth0  ({iface_outside})  outside / public-facing data plane
+#   eth1  ({iface_inside})   inside  / backend data plane + inside VIP
+#   eth2  ({iface_sync})     HA sync / VRRP heartbeats + IPVS session sync
 {vrrp_scripts_block}
+{lvs_sync_block}
 vrrp_sync_group VG_LB {{
     group {{
         VI_OUTSIDE
@@ -673,26 +710,21 @@ vrrp_sync_group VG_LB {{
 
 vrrp_instance VI_OUTSIDE {{
     state             {state}
-    # interface must be the inside interface (eth1) so the VRRP socket's
-    # SO_BINDTODEVICE forces heartbeat packets through the stable inside
-    # network.  Without this, VI_OUTSIDE heartbeats are sent via eth0 and
-    # can be dropped by AWS routing before reaching the peer, causing the
-    # sync group to force a spurious MASTER election even when VI_INSIDE
-    # heartbeats are arriving correctly.
+    # Both VRRP instances bind their heartbeat socket to eth2 (the dedicated
+    # HA sync interface).  This completely isolates VRRP traffic from the data
+    # plane: a burst of FTP traffic on eth1 can no longer starve the VRRP
+    # heartbeat and cause a spurious failover.
     # The outside VIP is still placed on eth0 via 'dev' in virtual_ipaddress.
-    interface         {iface_inside}
+    interface         {iface_sync}
     virtual_router_id {vrid_outside}
     priority          {priority}
     advert_int        {advert_int}
     down_timer_adverts {down_timer_adverts}
 {nopreempt}
-    # AWS VPC drops VRRP multicast (224.0.0.18); unicast is required.
-    # Both vrrp_instances use the inside (eth1) network for heartbeats —
-    # the inside IPs are fixed and stable, making this the most reliable
-    # unicast link regardless of which VIP is being managed.
-    unicast_src_ip  {src_inside}
+    # Unicast over eth2 — AWS VPC drops VRRP multicast (224.0.0.18).
+    unicast_src_ip  {src_sync}
     unicast_peer {{
-        {peer_inside}
+        {peer_sync}
     }}
 
     authentication {{
@@ -710,15 +742,15 @@ vrrp_instance VI_OUTSIDE {{
 
 vrrp_instance VI_INSIDE {{
     state             {state}
-    interface         {iface_inside}
+    interface         {iface_sync}
     virtual_router_id {vrid_inside}
     priority          {priority}
     advert_int        {advert_int}
     down_timer_adverts {down_timer_adverts}
 {nopreempt}
-    unicast_src_ip  {src_inside}
+    unicast_src_ip  {src_sync}
     unicast_peer {{
-        {peer_inside}
+        {peer_sync}
     }}
 
     authentication {{
@@ -737,18 +769,19 @@ vrrp_instance VI_INSIDE {{
         out = args.out.display(),
         notify_master = args.notify_master_out.display(),
         notify_backup = args.notify_backup_out.display(),
-        vip_outside = data.vip_outside,
-        vip_inside = data.vip_inside,
         iface_outside = args.iface_outside,
         iface_inside = args.iface_inside,
+        iface_sync = args.iface_sync,
+        vip_outside = data.vip_outside,
+        vip_inside = data.vip_inside,
         vrid_outside = args.vrid_outside,
         vrid_inside = args.vrid_inside,
         priority = priority,
         advert_int = args.advert_int,
         down_timer_adverts = args.down_timer_adverts,
         nopreempt = nopreempt,
-        src_inside = data.inside.primary_ip,
-        peer_inside = data.peer_inside_ip,
+        src_sync = data.sync.primary_ip,
+        peer_sync = data.peer_sync_ip,
         auth_pass = args.auth_pass,
         vrrp_scripts_block = vrrp_scripts_block,
         track_iface_block = track_iface_block,
@@ -828,9 +861,35 @@ vrrp_script chk_forward_path {{
     out
 }
 
+/// Render a second `global_defs { }` block containing the `lvs_sync_daemon`
+/// directive.  keepalived merges multiple global_defs blocks across included
+/// files, so this is safe alongside the existing block in keepalived.conf.
+///
+/// The sync daemon is bound to the VXLAN overlay interface (vxlan0), which
+/// encapsulates the multicast sync traffic as unicast UDP over eth2.  This
+/// satisfies keepalived's multicast-only restriction while working within
+/// AWS VPC's no-multicast constraint.  keepalived automatically switches the
+/// daemon between master (send) and backup (receive) roles on every VRRP
+/// state transition — no manual ipvsadm calls are needed in the notify scripts.
+fn render_lvs_sync_daemon(args: &Args) -> String {
+    format!(
+        r#"# ── IPVS connection sync daemon ──────────────────────────────────────────────
+# Bound to vxlan0: a point-to-point VXLAN tunnel over eth2.
+# keepalived manages master/backup role transitions automatically.
+
+global_defs {{
+    lvs_sync_daemon {iface_vxlan} VI_INSIDE id {sync_id}
+}}
+"#,
+        iface_vxlan = args.iface_vxlan,
+        sync_id     = args.lvs_sync_id,
+    )
+}
+
+
 /// Render the `track_interface { … }` block inside a vrrp_instance.
-/// Tracks both interfaces in every instance — if either link drops the sync
-/// group fails over as a unit.
+/// Tracks all three interfaces — if any link drops the sync group fails over
+/// as a unit immediately, without waiting for the VRRP heartbeat timeout.
 fn render_track_interface_block(args: &Args) -> String {
     if args.enable_track_interface {
         format!(
@@ -838,10 +897,12 @@ fn render_track_interface_block(args: &Args) -> String {
     track_interface {{
         {iface_outside}
         {iface_inside}
+        {iface_sync}
     }}
 "#,
             iface_outside = args.iface_outside,
             iface_inside = args.iface_inside,
+            iface_sync = args.iface_sync,
         )
     } else {
         format!(
@@ -850,10 +911,12 @@ fn render_track_interface_block(args: &Args) -> String {
     # track_interface {{
     #     {iface_outside}
     #     {iface_inside}
+    #     {iface_sync}
     # }}
 "#,
             iface_outside = args.iface_outside,
             iface_inside = args.iface_inside,
+            iface_sync = args.iface_sync,
         )
     }
 }
@@ -886,27 +949,30 @@ fn render_notify_master(args: &Args, data: &InstanceData) -> String {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     format!(
         r#"#!/bin/sh
-# notify-master.sh — generated by aeropulse for {instance_id}
+# notify-master.sh \u2014 generated by aeropulse for {instance_id}
 # Generated : {ts}
-# DO NOT EDIT MANUALLY — re-run aeropulse to regenerate.
+# DO NOT EDIT MANUALLY \u2014 re-run aeropulse to regenerate.
 #
 # Called by keepalived when this node's sync group (VG_LB) transitions to
 # MASTER.  Claims both virtual IPs at the AWS EC2 control plane using
 # AllowReassignment=true so they are stolen from the previous holder
 # atomically, without requiring a prior unassign step.
+#
+# The IPVS connection sync daemon is managed entirely by keepalived via the
+# lvs_sync_daemon directive in global_defs \u2014 no ipvsadm calls needed here.
 
 set -eu
 
-log() {{ logger -t keepalived-notify "notify-master[${{TYPE:-?}}/${{NAME:-?}}]: $*"; }}
+log() {{ logger -p local3.info -t keepalived-notify "notify-master[${{TYPE:-?}}/${{NAME:-?}}]: $*"; }}
 
 TYPE="${{1:-}}"
 NAME="${{2:-}}"
 STATE="${{3:-}}"
 
-log "Transitioning to MASTER on {instance_id} — claiming VIPs …"
+log "Transitioning to MASTER on {instance_id} \u2014 claiming VIPs ..."
 
-# Outside VIP — defaults to primary ENI (eth0), no --eni flag needed.
-{assign} assign-ip \
+# Outside VIP \u2014 defaults to primary ENI (eth0), no --eni flag needed.
+{assign} ip \
     --ip {vip_outside} \
     --region {region} \
     --allow-reassignment \
@@ -914,8 +980,8 @@ log "Transitioning to MASTER on {instance_id} — claiming VIPs …"
     && log "Outside VIP {vip_outside} assigned." \
     || {{ log "ERROR: failed to assign outside VIP {vip_outside}"; exit 1; }}
 
-# Inside VIP — must specify eth1's ENI ID explicitly.
-{assign} assign-ip \
+# Inside VIP \u2014 must specify eth1's ENI ID explicitly.
+{assign} ip \
     --ip {vip_inside} \
     --eni {eni_inside} \
     --region {region} \
@@ -927,42 +993,48 @@ log "Transitioning to MASTER on {instance_id} — claiming VIPs …"
 log "Both VIPs claimed successfully."
 "#,
         instance_id = data.instance_id,
-        ts = ts,
-        assign = args.assign_bin.display(),
+        ts          = ts,
+        assign      = args.assign_bin.display(),
         vip_outside = data.vip_outside,
-        vip_inside = data.vip_inside,
-        eni_inside = data.inside.eni_id,
-        region = args.region,
+        vip_inside  = data.vip_inside,
+        eni_inside  = data.inside.eni_id,
+        region      = args.region,
     )
 }
 
-// ── notify-backup.sh rendering ────────────────────────────────────────────────
+// \u2500\u2500 notify-backup.sh rendering \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-fn render_notify_backup() -> String {
+fn render_notify_backup(args: &Args, data: &InstanceData) -> String {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    // Suppress unused variable warnings \u2014 args and data are kept in the
+    // signature for consistency and future use.
+    let _ = args;
+    let _ = &data.instance_id;
     format!(
         r#"#!/bin/sh
-# notify-backup.sh — generated by aeropulse
+# notify-backup.sh \u2014 generated by aeropulse for {instance_id}
 # Generated : {ts}
-# DO NOT EDIT MANUALLY — re-run aeropulse to regenerate.
+# DO NOT EDIT MANUALLY \u2014 re-run aeropulse to regenerate.
 #
 # Called by keepalived when this node's sync group (VG_LB) transitions to
-# BACKUP.  No AWS API action is needed: the new MASTER will call
-# aeroplug assign-ip --allow-reassignment to atomically claim both VIPs.
+# BACKUP.  No AWS API action is needed: the new MASTER will claim the VIPs.
 # keepalived removes the virtual_ipaddress entries from the OS interfaces
 # automatically as part of the BACKUP transition.
+#
+# The IPVS connection sync daemon role is also switched automatically by
+# keepalived via lvs_sync_daemon \u2014 no ipvsadm calls needed here.
 
 set -eu
 
-logger -t keepalived-notify \
-    "notify-backup[${{1:-?}}/${{2:-?}}]: transitioned to BACKUP — no AWS action needed."
+logger -p local3.info -t keepalived-notify \
+    "notify-backup[${{1:-?}}/${{2:-?}}]: transitioned to BACKUP \u2014 no action needed."
 
 exit 0
 "#,
-        ts = ts,
+        instance_id = data.instance_id,
+        ts          = ts,
     )
 }
-
 // ── chk-backends.sh rendering ─────────────────────────────────────────────────
 
 fn render_chk_backends(args: &Args) -> String {
@@ -997,7 +1069,7 @@ ACTIVE=$(ipvsadm -l -n 2>/dev/null \
 if [ "${{ACTIVE}}" -ge "${{MIN_ACTIVE}}" ]; then
     exit 0
 else
-    logger -t keepalived-track \
+    logger -p local3.info -t keepalived-track \
         "chk-backends: ${{ACTIVE}} active backend(s), minimum is ${{MIN_ACTIVE}}"
     exit 1
 fi
@@ -1049,7 +1121,7 @@ nc -z -s "${{SRC_IP}}" -w "${{PROBE_TIMEOUT}}" "${{PROBE_HOST}}" "${{PROBE_PORT}
     >/dev/null 2>&1
 
 if [ $? -ne 0 ]; then
-    logger -t keepalived-track \
+    logger -p local3.info -t keepalived-track \
         "chk-forward-path: cannot reach ${{PROBE_HOST}}:${{PROBE_PORT}} via ${{SRC_IP}} (eth1)"
     exit 1
 fi
