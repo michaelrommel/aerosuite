@@ -104,14 +104,7 @@ slow_task() {
 		}"
 }
 
-for i in {1..5}; do
-	small_task
-	sleep 5
-done
-
-sleep 120
-
-for i in {1..20}; do
+for i in {1..50}; do
 	large_task
 	sleep 5
 done

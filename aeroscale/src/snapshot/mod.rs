@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
+pub use leases::{OWNER_MISSING, OWNER_UNKNOWN};
+
 use anyhow::Result;
 use tracing::warn;
 
@@ -166,16 +168,17 @@ impl SystemSnapshot {
     /// ASG and IPVS failures degrade gracefully (empty list + warning).
     /// Slot→IP mapping is computed directly via `slot_network` — no EC2 call.
     pub async fn collect(
-        weights_dir: &str,
-        region: &str,
-        asg_name: &str,
-        creds: &aerocore::AwsCredentials,
-        redis_con: &mut redis::aio::MultiplexedConnection,
+        weights_dir:  &str,
+        region:       &str,
+        asg_name:     &str,
+        creds:        &aerocore::AwsCredentials,
+        redis_con:    &mut redis::aio::MultiplexedConnection,
         slot_network: &SlotNetwork,
+        owner_cache:  &mut HashMap<u32, String>,
     ) -> Result<Self> {
         // ── Mandatory ─────────────────────────────────────────────────────────
         let weight_entries = weights::read_all(weights_dir).await?;
-        let lease_list = leases::read_all(redis_con).await?;
+        let lease_list = leases::read_all(redis_con, owner_cache).await?;
 
         // ── Best-effort ───────────────────────────────────────────────────────
         let (asg_group, asg_instances) = match asg::read_all(region, asg_name, creds).await {
