@@ -169,8 +169,8 @@ build {
   # outages that would otherwise cause the ASG query to fail and trigger
   # spurious backend cleanup cycles.
   provisioner "file" {
-    source      = "./_etc_dnsmasq.conf"
-    destination = "/tmp/_etc_dnsmasq.conf"
+    source      = "./_etc_dnsmasq.d_aeroscale.conf"
+    destination = "/tmp/_etc_dnsmasq.d_aeroscale.conf"
   }
   provisioner "file" {
     source      = "./_etc_dhcpcd.conf"
@@ -183,8 +183,9 @@ build {
 
   provisioner "shell" {
     inline = [
-      "sudo mv /tmp/_etc_dnsmasq.conf /etc/dnsmasq.conf",
-      "sudo chown root:root /etc/dnsmasq.conf",
+      "sudo mkdir -p /etc/dnsmasq.d",
+      "sudo mv /tmp/_etc_dnsmasq.d_aeroscale.conf /etc/dnsmasq.d/aeroscale.conf",
+      "sudo chown root:root /etc/dnsmasq.d/aeroscale.conf",
       # Replace dhcpcd.conf — nohook resolv.conf prevents DHCP renewals
       # from overwriting the static resolv.conf that points to dnsmasq.
       "sudo mv /tmp/_etc_dhcpcd.conf /etc/dhcpcd.conf",

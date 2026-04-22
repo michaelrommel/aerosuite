@@ -30,7 +30,7 @@ use redis::{aio::MultiplexedConnection, AsyncCommands};
 use tracing::{debug, error, info, warn};
 
 use aerocore::{asg, redis_pool::{key_owner, now_ms, KEY_AVAILABLE, KEY_LEASES}, AwsCredentials};
-use crate::snapshot::{BackendState, SlotLease, SystemSnapshot};
+use crate::snapshot::{BackendState, SlotLease, SystemSnapshot, OWNER_MISSING, OWNER_UNKNOWN};
 
 // ── Weight file constants ─────────────────────────────────────────────────────
 
@@ -185,6 +185,34 @@ async fn handle_lease(
     // Find the backend for this lease (may be None if EC2 join failed).
     let backend = snapshot.backends.iter()
         .find(|b| b.lease.as_ref().map(|l| l.slot) == Some(slot));
+
+    // ── Owner sentinel checks — unresolvable owner, do not act destructively ─
+    //
+    // "(missing)" — the slot:owner key is genuinely absent from Redis (Nil).
+    //   This is an abnormal state (lease present, owner record gone) but it is
+    //   not the same as the owner having left the ASG.  Releasing the slot on
+    //   this evidence alone would be wrong; the TTL on the lease will expire
+    //   naturally if the backend truly died.
+    //
+    // "(unknown)" — the GET slot:owner command failed with a Redis / network
+    //   error and no cached value from a previous cycle was available.  We have
+    //   no information about the owner, so no destructive action is safe.
+    if owner == OWNER_MISSING {
+        warn!(
+            slot,
+            "there is no owner record for this lease (slot:owner key absent) — \
+             skipping cleanup to avoid releasing a slot with incomplete information"
+        );
+        return Ok(());
+    }
+    if owner == OWNER_UNKNOWN {
+        warn!(
+            slot,
+            "lease owner is unresolvable (Redis error, no cached value) — \
+             skipping cleanup this cycle; will retry on the next snapshot"
+        );
+        return Ok(());
+    }
 
     // ── Owner no longer in ASG ─────────────────────────────────────────────
     if !in_asg {

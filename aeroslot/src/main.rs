@@ -455,8 +455,15 @@ async fn cmd_release(con: &mut MultiplexedConnection, slot: u32, instance_id: &s
         .await
         .context("GET owner failed")?;
 
-    if owner.as_deref() != Some(instance_id) {
-        bail!("Slot {slot} is not owned by '{instance_id}' — refusing to release.");
+    match owner.as_deref() {
+        None => bail!(
+            "Slot {slot} has no owner record in Redis — \
+             it may have already been released or the owner key was lost."
+        ),
+        Some(o) if o != instance_id => bail!(
+            "Slot {slot} is owned by '{o}', not '{instance_id}' — refusing to release."
+        ),
+        Some(_) => {} // ownership confirmed, proceed
     }
 
     // Release in this order so a concurrent claim never observes a half-released
@@ -538,10 +545,19 @@ async fn cmd_status(con: &mut MultiplexedConnection) -> Result<()> {
         println!("  {}", "─".repeat(width - 2));
 
         for (slot_str, expiry_score) in &sorted {
-            let owner: String = con
-                .get(key_owner(slot_str))
-                .await
-                .unwrap_or_else(|_| "(unknown)".to_string());
+            // Use Option<String> so redis-rs gives Ok(None) for a missing key
+            // rather than Err(...), cleanly separating three cases:
+            //   Ok(Some(id)) — key exists
+            //   Ok(None)     — key absent in Redis (Nil); lease has no owner record
+            //   Err(e)       — transient network / IO error
+            let owner: String = match con.get::<_, Option<String>>(key_owner(slot_str)).await {
+                Ok(Some(id)) => id,
+                Ok(None) => "(missing)".to_string(),
+                Err(e) => {
+                    eprintln!("⚠  GET slot:owner:{slot_str} failed: {e}");
+                    "(unknown)".to_string()
+                }
+            };
 
             let expiry_ms = *expiry_score as u64;
             let remaining = if expiry_ms <= now {

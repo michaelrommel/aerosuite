@@ -25,7 +25,7 @@
 //! weight files consistent with the master's — ready for an instant, correct
 //! failover.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result};
@@ -218,7 +218,7 @@ async fn compute_from_leases(
     redis_con:    &mut MultiplexedConnection,
     slot_network: &SlotNetwork,
 ) -> Result<()> {
-    let lease_list = leases::read_all(redis_con).await.unwrap_or_else(|e| {
+    let lease_list = leases::read_all(redis_con, &mut HashMap::new()).await.unwrap_or_else(|e| {
         warn!("Could not read leases for weight init: {e:#}");
         Vec::new()
     });

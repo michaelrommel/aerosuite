@@ -6,6 +6,7 @@
 //!
 //! See DESIGN.md for the full specification.
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -324,6 +325,10 @@ async fn main() -> Result<()> {
     // Lives outside the loop so state is preserved between cycles.
     let mut scaler_state  = ScalerState::default();
     let mut cleanup_state = CleanupState::default();
+    // Last successfully read owner instance-id per slot.
+    // Survives across snapshot cycles so that a transient Redis GET failure
+    // does not erase the known owner and trigger a spurious slot release.
+    let mut owner_cache: HashMap<u32, String> = HashMap::new();
 
     // ── Refresh loop ──────────────────────────────────────────────────────────
 
@@ -354,6 +359,7 @@ async fn main() -> Result<()> {
             &creds,
             &mut redis_con,
             &slot_network,
+            &mut owner_cache,
         )
         .await
         {
