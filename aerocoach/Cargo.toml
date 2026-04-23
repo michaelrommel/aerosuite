@@ -34,4 +34,5 @@ perf        = "warn"
 
 [dev-dependencies]
 # test-util enables tokio::time::pause() / advance() for deterministic clock tests
-tokio = { workspace = true, features = ["test-util"] }
+tokio    = { workspace = true, features = ["test-util"] }
+tempfile = "3"

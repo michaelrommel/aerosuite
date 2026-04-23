@@ -23,7 +23,7 @@ aws ecs run-task \
 	--cluster aeroftp-cluster \
 	--capacity-provider-strategy capacityProvider=${SPOT},weight=1 \
 	--network-configuration "awsvpcConfiguration={subnets=[subnet-0779b66ce8c3a599c],securityGroups=[sg-06d737ea5595c275d],assignPublicIp=ENABLED}" \
-	--task-definition aerocoach:5 \
+	--task-definition aerocoach:6 \
 	--enable-execute-command \
 	--overrides "{
 			\"containerOverrides\": [{

@@ -19,11 +19,16 @@ pub mod delta;
 pub mod metrics_store;
 pub mod registry;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{watch, Notify, RwLock};
+use tokio::sync::{broadcast, watch, Notify, RwLock};
 
 use crate::model::LoadPlanFile;
+use crate::ndjson_writer::NdjsonWriter;
+
+/// Capacity of the WebSocket broadcast channel (JSON strings).
+const WS_BROADCAST_CAPACITY: usize = 32;
 
 // ── Coach state machine ────────────────────────────────────────────────────
 
@@ -100,18 +105,44 @@ pub struct AppState {
     /// Stop signal.  Send `true` to request early termination of the clock.
     /// Use [`AppState::signal_stop`] — no write lock required.
     stop_tx: watch::Sender<bool>,
+
+    // ── WebSocket broadcast ───────────────────────────────────────────────
+
+    /// Sender half of the WebSocket fan-out channel.  The delta ticker sends
+    /// serialised `DashboardUpdate` JSON here every ~3 s.  Each connected
+    /// aerotrack client holds a matching `Receiver`.
+    pub ws_tx: broadcast::Sender<String>,
+
+    // ── NDJSON record writer ──────────────────────────────────────────────
+
+    /// Directory where NDJSON result files are written (from env config).
+    pub record_dir: PathBuf,
+
+    /// Open record writer for the current test run.  `Some` from
+    /// `POST /start` until the delta ticker flushes it on DONE, or until
+    /// `reset()` drops it.
+    pub record_writer: Option<NdjsonWriter>,
+
+    /// Path of the NDJSON file for the most recent (or current) test run.
+    /// Used by `GET /results` to serve the download.
+    pub record_file_path: Option<PathBuf>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let (stop_tx, _) = watch::channel(false);
+        let (stop_tx, _)      = watch::channel(false);
+        let (ws_tx, _ws_rx_0) = broadcast::channel(WS_BROADCAST_CAPACITY);
         Self {
-            coach_state: CoachState::Waiting,
-            load_plan:   None,
-            registry:    registry::Registry::new(),
-            metrics:     metrics_store::MetricsStore::new(),
-            ack_notify:  Arc::new(Notify::new()),
+            coach_state:      CoachState::Waiting,
+            load_plan:        None,
+            registry:         registry::Registry::new(),
+            metrics:          metrics_store::MetricsStore::new(),
+            ack_notify:       Arc::new(Notify::new()),
             stop_tx,
+            ws_tx,
+            record_dir:       PathBuf::from("/data/records"),
+            record_writer:    None,
+            record_file_path: None,
         }
     }
 
@@ -119,6 +150,13 @@ impl AppState {
     /// metrics.  The load plan is preserved so the same test can be re-run
     /// immediately.  Call only when `coach_state` is `Done`.
     pub fn reset(&mut self) {
+        // Flush any remaining buffered records before dropping the writer.
+        if let Some(ref mut w) = self.record_writer {
+            let _ = w.flush();
+        }
+        self.record_writer    = None;
+        self.record_file_path = None;
+
         self.coach_state = CoachState::Waiting;
         self.registry    = registry::Registry::new();
         self.metrics     = metrics_store::MetricsStore::new();

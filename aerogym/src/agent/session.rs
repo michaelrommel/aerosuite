@@ -262,6 +262,15 @@ async fn handle_slice_tick(
 
 // ── Graceful / immediate shutdown ─────────────────────────────────────────
 
+/// Maximum time to wait for in-flight FTP transfers to drain after a
+/// graceful `ShutdownCmd`.  Transfers still running at the deadline are
+/// aborted so the agent can re-register promptly for the next test run.
+///
+/// 60 s covers even the largest files in normal network conditions.  If
+/// the FTP server is unreachable or a connection stalls permanently the
+/// agent still recovers within this window instead of hanging forever.
+const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn shutdown(
     graceful: bool,
     agent_id: &str,
@@ -272,10 +281,38 @@ async fn shutdown(
     report_tx: mpsc::Sender<AgentReport>,
 ) -> Result<()> {
     if graceful {
-        info!(tasks = active_tasks.len(), "waiting for in-flight transfers to finish");
-        while let Some(result) = active_tasks.join_next().await {
-            if let Ok(outcome) = result {
-                metrics.record(outcome);
+        let n = active_tasks.len();
+        info!(tasks = n, "waiting for in-flight transfers to finish");
+
+        let deadline = tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT);
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Drain timeout — abort whatever is left and move on.
+                _ = &mut deadline => {
+                    let remaining = active_tasks.len();
+                    if remaining > 0 {
+                        warn!(
+                            tasks = remaining,
+                            timeout_secs = GRACEFUL_DRAIN_TIMEOUT.as_secs(),
+                            "graceful drain timed out — aborting remaining transfers"
+                        );
+                        active_tasks.shutdown().await;
+                    }
+                    break;
+                }
+
+                // Normal completion path.
+                result = active_tasks.join_next() => {
+                    match result {
+                        Some(Ok(outcome))  => metrics.record(outcome),
+                        Some(Err(e))       => warn!(error = %e, "transfer task panicked"),
+                        None               => break, // all tasks finished cleanly
+                    }
+                }
             }
         }
     } else {

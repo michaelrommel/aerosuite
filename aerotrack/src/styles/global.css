@@ -1,0 +1,55 @@
+/* ── Gruvbox Dark theme variables ─────────────────────────────────────────── */
+:root {
+  /* Backgrounds */
+  --bg:   #151819;   /* darkest — page background        */
+  --bg1:  #1d2021;   /* panels, toolbars                 */
+  --bg2:  #282828;   /* cards                            */
+  --bg3:  #3c3836;   /* borders, dividers                */
+  --bg4:  #504945;   /* selection, active borders        */
+
+  /* Foregrounds */
+  --fg:     #ebdbb2; /* primary text                     */
+  --fg2:    #d5c4a1; /* slightly dimmed                  */
+  --fg3:    #bdae93; /* medium                           */
+  --fg4:    #a89984; /* muted (ansi 7)                   */
+  --fg-dim: #928374; /* very muted (bright 0)            */
+
+  /* Accent colours */
+  --yellow:    #d79921;
+  --yellow-br: #fabd2f;
+  --blue:      #458588;
+  --blue-br:   #83a598;
+  --green:     #98971a;
+  --green-br:  #b8bb26;
+  --red:       #cc241d;
+  --red-br:    #fb4934;
+  --orange:    #d65d0e;
+  --orange-br: #fe8019;
+  --purple:    #b16286;
+  --purple-br: #d3869b;
+  --cyan:      #689d6a;
+  --cyan-br:   #8ec07c;
+}
+
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar           { width: 6px; height: 6px; }
+::-webkit-scrollbar-track     { background: var(--bg); }
+::-webkit-scrollbar-thumb     { background: var(--bg4); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }

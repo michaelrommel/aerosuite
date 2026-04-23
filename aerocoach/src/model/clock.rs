@@ -140,6 +140,20 @@ impl SliceClock {
             }
         }
 
+        // Wait for the last slice to run its full duration before sending
+        // ShutdownCmd.  Without this extra tick, ShutdownCmd fires ~8 ms
+        // after SliceTick(N-1) — right after acks arrive, while agents have
+        // just ramped up their connections and are still mid-transfer.
+        let stop_requested = tokio::select! {
+            biased;
+            _ = self.stop_rx.wait_for(|v| *v) => true,
+            _ = ticker.tick()                  => false,
+        };
+        if stop_requested {
+            self.on_stop("POST /stop during last slice").await;
+            return;
+        }
+
         self.on_complete().await;
     }
 
