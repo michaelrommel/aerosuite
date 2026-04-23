@@ -1,0 +1,201 @@
+syntax = "proto3";
+package aeromonitor;
+
+// ─── Service definition ────────────────────────────────────────────────────
+
+// Hosted by aerocoach, called by aerogym agents.
+service AgentService {
+    // Unary: agent registers on startup, receives its load plan and assigned index.
+    rpc Register(RegisterRequest) returns (RegisterResponse);
+
+    // Bidirectional stream: maintained for the lifetime of the test.
+    //   Agent → aerocoach : AgentReport  (metrics, slice acknowledgements)
+    //   aerocoach → agent : CoachCommand (slice ticks, plan updates, shutdown)
+    rpc Session(stream AgentReport) returns (stream CoachCommand);
+}
+
+// ─── Registration ─────────────────────────────────────────────────────────
+
+message RegisterRequest {
+    // Human-readable tag like "a00"–"a99"; supplied via env var AEROGYM_AGENT_ID.
+    string agent_id      = 1;
+    string agent_version = 2;  // Binary version string for compatibility checks.
+
+    // Populated by the agent from the ECS task metadata endpoint
+    // (http://169.254.170.2/v2/metadata) at startup.
+    string private_ip  = 3;  // e.g. "10.0.1.23"
+    string instance_id = 4;  // ECS task ARN short ID or EC2 instance ID
+}
+
+message RegisterResponse {
+    bool   accepted      = 1;
+    string reject_reason = 2;  // Non-empty when accepted == false.
+
+    // Index assigned by aerocoach; used for per-agent load share calculation.
+    // Range 0 .. (total_agents - 1).
+    uint32 agent_index = 3;
+
+    // Full load plan for this test run.
+    LoadPlan load_plan = 4;
+}
+
+// ─── Load plan ────────────────────────────────────────────────────────────
+
+message LoadPlan {
+    string plan_id = 1;
+
+    // Wall-clock start time; 0 = start immediately after all agents register.
+    int64  start_time_ms     = 2;
+
+    // Duration of each time slice in milliseconds.
+    uint64 slice_duration_ms = 3;
+
+    // Ordered list of slices (index 0 = first slice after start).
+    repeated TimeSlice slices = 4;
+
+    // File-size histogram that drives test-file generation and task assignment.
+    FileSizeDistribution file_distribution = 5;
+
+    // Total aggregate bandwidth ceiling across ALL agents (bytes per second).
+    // Each agent's share = total_bandwidth_bps / total_agents.
+    uint64 total_bandwidth_bps = 6;
+
+    // Total number of agents expected; used for per-agent share calculation.
+    uint32 total_agents = 7;
+}
+
+message TimeSlice {
+    uint32 slice_index = 1;
+
+    // Target number of CONCURRENT connections across ALL agents at this slice.
+    // Each agent's share = ceil(total_connections / total_agents),
+    // with the last agent absorbing the remainder.
+    uint32 total_connections = 2;
+}
+
+message FileSizeDistribution {
+    repeated FileSizeBucket buckets = 1;
+}
+
+message FileSizeBucket {
+    // Short identifier, e.g. "xs", "sm", "md", "lg", "xl", "xxl", "giant"
+    string bucket_id      = 1;
+    uint64 size_min_bytes = 2;
+    uint64 size_max_bytes = 3;
+
+    // Fraction of connections that should use this bucket, 0.0–1.0.
+    float  percentage     = 4;
+}
+
+// ─── Bidirectional stream messages ────────────────────────────────────────
+
+// Agent → aerocoach
+message AgentReport {
+    string agent_id     = 1;
+    int64  timestamp_ms = 2;
+
+    oneof payload {
+        SliceAck      slice_ack      = 3;  // Confirms agent has advanced to a slice.
+        MetricsUpdate metrics_update = 4;  // Periodic status snapshot.
+    }
+}
+
+message SliceAck {
+    uint32 slice_index = 1;
+}
+
+message MetricsUpdate {
+    uint32 current_slice      = 1;
+    uint32 active_connections = 2;
+    uint32 queued_connections = 3;
+
+    // Transfers completed since the previous MetricsUpdate.
+    repeated TransferRecord completed_transfers = 4;
+}
+
+message TransferRecord {
+    string          filename          = 1;  // As sent to the FTP server.
+    string          bucket_id         = 2;  // Which file-size bucket was used.
+    uint64          bytes_transferred = 3;
+    uint64          file_size_bytes   = 4;
+    uint32          bandwidth_kibps   = 5;  // Average KiB/s for this transfer.
+    bool            success           = 6;
+    optional string error_reason      = 7;
+    int64           start_time_ms     = 8;
+    int64           end_time_ms       = 9;
+    uint32          time_slice        = 10; // Slice in which this transfer was STARTED.
+}
+
+// aerocoach → agent
+message CoachCommand {
+    oneof payload {
+        SliceTick      slice_tick  = 1;  // Advance to the next slice.
+        LoadPlanUpdate plan_update = 2;  // Partial or full plan change.
+        ShutdownCmd    shutdown    = 3;  // Graceful test termination.
+    }
+}
+
+message SliceTick {
+    uint32 slice_index   = 1;
+    int64  wall_clock_ms = 2;  // Expected wall-clock time; allows drift detection.
+}
+
+// Sent when the operator changes parameters mid-test.
+message LoadPlanUpdate {
+    uint32 effective_from_slice = 1;
+
+    // Replaces slices from effective_from_slice onwards; earlier slices unchanged.
+    repeated TimeSlice updated_slices = 2;
+
+    // Optional field-level overrides (absent = no change).
+    optional uint64              new_bandwidth_bps     = 3;
+    optional FileSizeDistribution new_file_distribution = 4;
+}
+
+message ShutdownCmd {
+    // If true, agents finish in-flight transfers before exiting.
+    // If false, agents abort immediately.
+    bool   graceful = 1;
+    string reason   = 2;
+}
+
+// ─── Dashboard messages (JSON-serialised over WebSocket) ──────────────────
+
+// aerocoach serialises this to JSON and broadcasts over the /ws endpoint.
+// Sent to aerotrack approximately every 3 seconds.
+message DashboardUpdate {
+    int64  timestamp_ms  = 1;
+    uint32 current_slice = 2;
+    uint32 total_slices  = 3;
+
+    repeated AgentSnapshot agents = 4;
+
+    // Delta: only transfers that completed since the last broadcast.
+    repeated TransferRecord completed_transfers = 5;
+
+    // Aggregate totals across all agents since test start.
+    GlobalStats global_stats = 6;
+}
+
+message AgentSnapshot {
+    string agent_id           = 1;
+    uint32 agent_index         = 2;
+    bool   connected           = 3;
+    uint32 current_slice       = 4;
+    uint32 active_connections  = 5;
+    uint64 bytes_transferred   = 6;  // Cumulative for this agent.
+    uint32 success_count       = 7;
+    uint32 error_count         = 8;
+    string private_ip          = 9;  // Forwarded from RegisterRequest.
+    string instance_id         = 10; // Forwarded from RegisterRequest.
+}
+
+message GlobalStats {
+    uint64 total_bytes_transferred = 1;
+    uint32 total_success           = 2;
+    uint32 total_errors            = 3;
+    uint32 active_agents           = 4;
+    uint32 active_connections      = 5;
+    double overall_error_rate      = 6;  // 0.0–1.0
+    uint64 current_bandwidth_bps   = 7;  // Measured across all agents.
+}

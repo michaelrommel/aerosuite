@@ -1,33 +1,60 @@
 [package]
-name = "aerogym"
+name    = "aerogym"
 version = "0.1.0"
 edition = "2024"
 
+# ── Binaries ──────────────────────────────────────────────────────────────────
+# Default binary (src/main.rs) → aerogym   (new agent, controlled by aerocoach)
+# Explicit entry below      → aerostress  (legacy stand-alone stress tester)
+
+[[bin]]
+name = "aerostress"
+path = "src/bin/legacy.rs"
+
+# ── Dependencies shared by both binaries ──────────────────────────────────────
 [dependencies]
-anyhow = "1.0.100"
-log = "0.4"
-pretty_env_logger = "0.5"
+# ── Workspace ─────────────────────────────────────────────────────────────────
+anyhow             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono             = { workspace = true }
+
+# ── Local (aerogym-specific versions) ─────────────────────────────────────────
+# tokio: legacy needs fs/io-util; agent needs sync for mpsc + full JoinSet
+tokio      = { version = "1", features = ["macros", "rt-multi-thread", "fs", "time", "io-util", "signal", "sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = { version = "0.1", features = ["time", "sync"] }
+futures    = "0.3"
+rand       = "0.10"
+socket2    = "0.6"
+governor   = "0.10"
+async-stream = "0.3"
+
+# FTP client (used by both binaries)
 suppaftp = { version = "8", features = ["tokio"] }
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "fs", "time", "io-util", "signal"] }
-tokio-util = { version = "0.7.18", features = ["io"] }
-tokio-stream = { version = "0.1.18", features = ["time"] }
-rand = "0.10.1"
-socket2 = "0.6"
-futures = "0.3.32"
-governor = "0.10"
-async-stream = "0.3.6"
+
+# Legacy binary logging
+log              = "0.4"
+pretty_env_logger = "0.5"
+
+# ── Agent-only ────────────────────────────────────────────────────────────────
+aeroproto = { path = "../aeroproto" }
+tonic     = "0.12"
+prost     = "0.13"
 
 [dev-dependencies]
-governor = "0.10"
-nonzero_ext = "0.3"
-socket2 = "0.6"
+governor     = "0.10"
+nonzero_ext  = "0.3"
+socket2      = "0.6"
 
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
 correctness = "deny"
-suspicious = "warn"
-style = "warn"
-complexity = "warn"
-perf = "warn"
+suspicious  = "warn"
+style       = "warn"
+complexity  = "warn"
+perf        = "warn"

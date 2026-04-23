@@ -1,11 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "aerocoach",
     "aerocore",
     "aeroftp",
     "aerogym",
     "aeroplug",
     "aeropulse",
+    "aeroproto",
     "aeroscale",
     "aeroslot",
 ]
