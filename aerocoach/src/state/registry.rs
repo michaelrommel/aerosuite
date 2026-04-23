@@ -46,6 +46,11 @@ pub struct AgentEntry {
     /// True while the agent has an open `Session` stream.
     pub connected: bool,
 
+    /// Monotonically increasing counter, incremented each time a new `Session`
+    /// is attached.  Used by [`Registry::close_session`] to avoid stale
+    /// cleanup tasks clobbering a newer session.
+    pub session_gen: u64,
+
     /// Sender half of the per-agent command channel.
     /// Present once the agent calls `Session`; `None` before that or after
     /// the session ends.
@@ -67,6 +72,7 @@ impl AgentEntry {
             current_slice: 0,
             active_connections: 0,
             connected: false,
+            session_gen: 0,
             cmd_tx: None,
         }
     }
@@ -165,28 +171,54 @@ impl Registry {
 
     /// Attach a command channel to an already-registered agent.
     ///
-    /// Called by the `Session` RPC handler after creating the mpsc channel.
-    /// Returns the [`mpsc::Sender`] stored previously (if any) for cleanup,
-    /// and `true` if the agent was found.
+    /// Increments the entry's `session_gen` counter and returns the new value.
+    /// The caller (the session receive task) must pass this generation back to
+    /// [`Self::close_session`] so that a stale cleanup from an old session
+    /// cannot accidentally close a newer one.
     pub fn set_session_channel(
         &mut self,
         agent_id: &str,
         tx: mpsc::Sender<CoachCommand>,
-    ) -> bool {
+    ) -> u64 {
         if let Some(entry) = self.entries.get_mut(agent_id) {
+            entry.session_gen += 1;
+            let new_gen = entry.session_gen;
             entry.cmd_tx = Some(tx);
             entry.connected = true;
             entry.current_slice = 0;
             entry.active_connections = 0;
-            info!(agent_id = %agent_id, "agent session opened");
-            true
+            info!(agent_id = %agent_id, session_gen = new_gen, "agent session opened");
+            new_gen
         } else {
             warn!(agent_id = %agent_id, "set_session_channel: agent not found");
-            false
+            0
         }
     }
 
-    /// Mark an agent as disconnected and drop its command channel.
+    /// Close a session only if `gen` still matches the entry's current
+    /// `session_gen`.  This prevents a stale session-receive task from
+    /// accidentally dropping the command channel of a *newer* session that
+    /// the agent opened after reconnecting.
+    pub fn close_session(&mut self, agent_id: &str, session_gen: u64) {
+        if let Some(entry) = self.entries.get_mut(agent_id) {
+            if entry.session_gen == session_gen {
+                entry.connected = false;
+                entry.cmd_tx = None;
+                info!(agent_id = %agent_id, session_gen, "agent session closed");
+            } else {
+                debug!(
+                    agent_id = %agent_id,
+                    stale_gen  = session_gen,
+                    current_gen = entry.session_gen,
+                    "ignoring stale session close"
+                );
+            }
+        }
+    }
+
+    /// Mark an agent as disconnected and drop its command channel,
+    /// unconditionally.  Used by [`Self::broadcast`] when a channel is found
+    /// to be closed.
     pub fn deregister(&mut self, agent_id: &str) {
         if let Some(entry) = self.entries.get_mut(agent_id) {
             entry.connected = false;

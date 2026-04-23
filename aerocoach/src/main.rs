@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with_ansi(std::env::var_os("NO_COLOR").is_none())
         .init();
 
     // ── Config ────────────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ async fn main() -> Result<()> {
         .route("/status", get(status_handler))
         .route("/start",  post(start_handler))
         .route("/stop",   post(stop_handler))
+        .route("/reset",  post(reset_handler))
         .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
 
@@ -237,6 +239,29 @@ async fn stop_handler(State(state): State<SharedState>) -> impl IntoResponse {
     info!("stop signal sent to slice clock");
 
     (StatusCode::OK, Json(json!({ "status": "stopping" })))
+}
+
+/// `POST /reset` — transition DONE → WAITING so agents can re-register and
+/// the same plan (or a newly loaded one) can be executed again.
+async fn reset_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let mut write = state.write().await;
+
+    if !write.coach_state.is_done() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "cannot reset: coach is in state {}, must be DONE",
+                    write.coach_state
+                )
+            })),
+        );
+    }
+
+    write.reset();
+    info!("aerocoach reset — back to WAITING, agents may re-register");
+
+    (StatusCode::OK, Json(json!({ "status": "waiting" })))
 }
 
 // ── Shutdown signal ───────────────────────────────────────────────────────

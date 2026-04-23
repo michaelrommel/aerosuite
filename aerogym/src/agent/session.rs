@@ -640,7 +640,7 @@ mod tests {
         run_agent(
             server.port,
             &plan_with_transfers(TRANSFERS),
-            "anonymous", "",
+            "test", "secret",
             FTP_PORT,
         ).await;
 

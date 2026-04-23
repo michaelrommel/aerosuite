@@ -115,6 +115,17 @@ impl AppState {
         }
     }
 
+    /// Reset to WAITING, clearing all agent registrations and accumulated
+    /// metrics.  The load plan is preserved so the same test can be re-run
+    /// immediately.  Call only when `coach_state` is `Done`.
+    pub fn reset(&mut self) {
+        self.coach_state = CoachState::Waiting;
+        self.registry    = registry::Registry::new();
+        self.metrics     = metrics_store::MetricsStore::new();
+        self.ack_notify  = Arc::new(Notify::new());
+        self.reset_stop();
+    }
+
     /// How many agents are currently registered (connected or not).
     pub fn agent_count(&self) -> usize {
         self.registry.len()

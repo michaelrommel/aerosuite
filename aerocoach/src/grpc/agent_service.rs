@@ -150,10 +150,10 @@ impl AgentService for AgentServiceImpl {
         // ── Create per-agent command channel ──────────────────────────
         let (cmd_tx, cmd_rx) = mpsc::channel::<CoachCommand>(64);
 
-        {
+        let session_gen = {
             let mut write = self.state.write().await;
-            write.registry.set_session_channel(&agent_id, cmd_tx);
-        }
+            write.registry.set_session_channel(&agent_id, cmd_tx)
+        };
 
         // ── Process the first message ─────────────────────────────────
         handle_report(&self.state, &first).await;
@@ -171,8 +171,10 @@ impl AgentService for AgentServiceImpl {
                     }
                 }
             }
-            // Session ended — clean up
-            state.write().await.registry.deregister(&aid);
+            // Close only if this is still the current session — prevents a
+            // stale task from clobbering a newer session the agent opened
+            // after reconnecting.
+            state.write().await.registry.close_session(&aid, session_gen);
             info!(agent_id = %aid, "session receive task finished");
         });
 

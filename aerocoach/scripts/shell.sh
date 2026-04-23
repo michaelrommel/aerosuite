@@ -11,7 +11,7 @@ fi
 aws ecs execute-command \
 	--region eu-west-2 \
 	--cluster aeroftp-cluster \
-	--container aerogym \
+	--container aerocoach \
 	--command "/bin/sh" \
 	--interactive \
 	--task "${TASK}"

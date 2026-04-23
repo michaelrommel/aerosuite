@@ -16,8 +16,9 @@ use tonic::transport::Channel;
 
 use super::config::Config;
 
-const MAX_RETRIES: u32 = 8;
-const RETRY_DELAY: Duration = Duration::from_secs(3);
+const MAX_RETRIES: u32 = 16;
+const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+const RETRY_MAX_DELAY:  Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Outcome of a successful registration.
@@ -42,15 +43,20 @@ pub async fn register(config: &Config) -> Result<Registration> {
         match try_register(config).await {
             Ok(reg) => return Ok(reg),
             Err(e) => {
+                // Exponential back-off: 2 s, 4 s, 8 s, … capped at 30 s.
+                let delay = std::cmp::min(
+                    RETRY_MAX_DELAY,
+                    RETRY_BASE_DELAY * 2u32.pow(attempt - 1),
+                );
                 warn!(
                     attempt,
-                    max = MAX_RETRIES,
+                    max   = MAX_RETRIES,
+                    delay = delay.as_secs(),
                     error = %e,
-                    "registration failed, retrying in {}s",
-                    RETRY_DELAY.as_secs()
+                    "registration failed, retrying"
                 );
                 last_err = Some(e);
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::time::sleep(delay).await;
             }
         }
     }
