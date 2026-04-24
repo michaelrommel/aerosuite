@@ -26,6 +26,11 @@
 	</div>
 
 	<div class="card">
+		<div class="label">Active connections</div>
+		<div class="value">{stats?.active_connections ?? '—'}</div>
+	</div>
+
+	<div class="card">
 		<div class="label">Current bandwidth</div>
 		<div class="value">{stats ? formatBandwidth(stats.current_bandwidth_bps) : '—'}</div>
 	</div>
@@ -34,13 +39,24 @@
 <style>
 	.stats-panel {
 		display: grid;
-		grid-template-columns: 1fr 1fr;
+		/* 6 equal columns: row 1 cards span 3 each (half width),
+		   row 2 cards span 2 each (third width) */
+		grid-template-columns: repeat(6, 1fr);
 		grid-template-rows: 1fr 1fr;
 		gap: 10px;
 		padding: 12px;
 		height: 100%;
 		box-sizing: border-box;
 	}
+
+	/* Row 1: two half-width cards */
+	.card:nth-child(1) { grid-column: 1 / 4; }
+	.card:nth-child(2) { grid-column: 4 / 7; }
+
+	/* Row 2: three equal-width cards */
+	.card:nth-child(3) { grid-column: 1 / 3; }
+	.card:nth-child(4) { grid-column: 3 / 5; }
+	.card:nth-child(5) { grid-column: 5 / 7; }
 
 	.card {
 		background: var(--bg2);
