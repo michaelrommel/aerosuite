@@ -27,6 +27,29 @@ class DashboardStore {
 	totalSlices  = $state<number>(0);
 	lastUpdated  = $state<number | null>(null);
 	wsStatus     = $state<WsStatus>('connecting');
+	/** Coach state string as returned by GET /status, e.g. "RUNNING(slice=0)". */
+	coachState   = $state<string>('WAITING');
+
+	/**
+	 * Timestamp (ms) of the first DashboardUpdate received for the current
+	 * slice.  Used by PlanPanel to track the dot’s position across the slice.
+	 * Reset whenever currentSlice advances.
+	 */
+	sliceStartMs = $state<number | null>(null);
+
+	/**
+	 * Per-tick history of `active_connections` — up to HISTORY_MAX entries,
+	 * newest last.  Persists across DONE; cleared only on explicit reset.
+	 */
+	connectionsHistory = $state<number[]>([]);
+
+	/**
+	 * Per-tick history of `current_bandwidth_bps` — up to HISTORY_MAX entries,
+	 * newest last.  Persists across DONE; cleared only on explicit reset.
+	 */
+	bandwidthHistory = $state<number[]>([]);
+
+	private static readonly HISTORY_MAX = 30;
 
 	private client: WebSocketClient;
 
@@ -45,16 +68,68 @@ class DashboardStore {
 
 	/** Apply one DashboardUpdate received over the WebSocket. */
 	applyUpdate(update: DashboardUpdate): void {
+		// Record the timestamp of the first update in each new slice so the
+		// PlanPanel dot can compute its position within the slice band.
+		// Must be checked before currentSlice is overwritten.
+		if (update.current_slice !== this.currentSlice || this.sliceStartMs === null) {
+			this.sliceStartMs = update.timestamp_ms;
+		}
+
 		this.currentSlice = update.current_slice;
 		this.totalSlices  = update.total_slices;
-		this.globalStats  = update.global_stats;
 		this.lastUpdated  = update.timestamp_ms;
+
+		// Freeze global stats once the test is done so that late-arriving
+		// MetricsUpdates from the agent's graceful-drain phase don't overwrite
+		// the numbers that were accurate at the moment the test ended.
+		if (!this.coachState.startsWith('DONE')) {
+			this.globalStats = update.global_stats;
+		}
 
 		const next = new Map<number, AgentSnapshot>();
 		for (const agent of update.agents) {
 			next.set(agent.agent_index, agent);
 		}
 		this.agents = next;
+
+		// Append to sparkline histories only while the test is running so the
+		// charts don't drift during WAITING or after the test ends.
+		if (this.coachState.startsWith('RUNNING')) {
+			const hmax = DashboardStore.HISTORY_MAX;
+			this.connectionsHistory = [
+				...this.connectionsHistory,
+				update.global_stats.active_connections
+			].slice(-hmax);
+			this.bandwidthHistory = [
+				...this.bandwidthHistory,
+				update.global_stats.current_bandwidth_bps
+			].slice(-hmax);
+		}
+	}
+
+	/**
+	 * Notify the store of the current coach state (WAITING / RUNNING / DONE).
+	 * Called by ControlBar after every /status poll so history gating stays
+	 * in sync without requiring a separate WebSocket field.
+	 */
+	setCoachState(state: string): void {
+		// When transitioning into RUNNING, clear the slice-start anchor so the
+		// first RUNNING update sets it from scratch instead of reusing a stale
+		// WAITING-era timestamp (which would make the dot start mid-slice).
+		if (state.startsWith('RUNNING') && !this.coachState.startsWith('RUNNING')) {
+			this.sliceStartMs = null;
+		}
+		this.coachState = state;
+	}
+
+	/**
+	 * Clear sparkline histories.  Call when the operator issues a reset so
+	 * the charts start fresh for the next test run.
+	 */
+	clearHistory(): void {
+		this.connectionsHistory = [];
+		this.bandwidthHistory   = [];
+		this.sliceStartMs       = null;
 	}
 
 	/**

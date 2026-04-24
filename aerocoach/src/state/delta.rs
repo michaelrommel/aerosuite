@@ -153,16 +153,35 @@ impl DeltaEngine {
             0.0
         };
 
-        // ── Instantaneous bandwidth ────────────────────────────────────
-        // Combine bytes from transfers that *completed* this tick with the
-        // *progress* made by still-running transfers (diff of bytes_in_flight
-        // vs. the previous snapshot).  This gives a meaningful reading even
-        // when no transfer finishes within the 3 s window.
-        let delta_completed: u64 = drained
+        // ── Instantaneous bandwidth ────────────────────────────────────────────
+        //
+        // For in-flight transfers: use the positive delta of bytes_in_flight
+        // vs. the previous snapshot — this correctly reflects incremental
+        // progress within each 3 s window.
+        //
+        // For completed transfers: bytes_transferred is the *cumulative total*
+        // for the whole transfer, not just the last window.  If the agent was
+        // sending heartbeats (prev_inflight > 0), those earlier bytes were
+        // already counted in previous delta_inflight contributions.  Subtract
+        // prev_inflight to keep only the tail that wasn’t yet reported,
+        // preventing the final tick from spiking to the full-file rate.
+        // Transfers with no prior inflight tracking (fast/unlimited) have
+        // prev_inflight == 0, so their full bytes_transferred is used as-is.
+
+        // Sum completed bytes per agent (there may be several concurrent).
+        let mut completed_by_agent: std::collections::HashMap<&str, u64> =
+            std::collections::HashMap::new();
+        for (agent_id, r) in drained.iter().filter(|(_, r)| r.success) {
+            *completed_by_agent.entry(agent_id.as_str()).or_insert(0) += r.bytes_transferred;
+        }
+        let delta_completed: u64 = completed_by_agent
             .iter()
-            .filter(|(_, r)| r.success)
-            .map(|(_, r)| r.bytes_transferred)
+            .map(|(agent_id, &total)| {
+                let prev = self.prev_inflight.get(*agent_id).copied().unwrap_or(0);
+                total.saturating_sub(prev)
+            })
             .sum();
+
         let delta_inflight: u64 = agents
             .iter()
             .map(|a| {
@@ -170,6 +189,7 @@ impl DeltaEngine {
                 a.bytes_in_flight.saturating_sub(prev)
             })
             .sum();
+
         // Update stored snapshot for next tick.
         self.prev_inflight = agents
             .iter()
@@ -178,6 +198,15 @@ impl DeltaEngine {
 
         let current_bandwidth_bps =
             ((delta_completed + delta_inflight) as f64 / elapsed_secs) as u64;
+
+        tracing::debug!(
+            elapsed_ms        = (elapsed_secs * 1000.0) as u64,
+            delta_completed_b = delta_completed,
+            delta_inflight_b  = delta_inflight,
+            bandwidth_bps     = current_bandwidth_bps,
+            bandwidth_mbit    = (current_bandwidth_bps * 8) / 1_000_000,
+            "bandwidth tick"
+        );
 
         // ── Delta transfer records ─────────────────────────────────────
         let completed_transfers: Vec<TransferDelta> = drained

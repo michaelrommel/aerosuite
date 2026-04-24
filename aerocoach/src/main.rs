@@ -50,7 +50,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use aeroproto::aeromonitor::agent_service_server::AgentServiceServer;
-use aeroproto::aeromonitor::{coach_command, CoachCommand, LoadPlanUpdate, TimeSlice, TransferRecord};
+use aeroproto::aeromonitor::{coach_command, CoachCommand, LoadPlanUpdate, ShutdownCmd, TimeSlice, TransferRecord};
 
 use crate::config::Config;
 use crate::grpc::agent_service::AgentServiceImpl;
@@ -429,6 +429,7 @@ async fn plan_patch_handler(
                 updated_slices:       proto_slices,
                 new_bandwidth_bps:    body.new_bandwidth_bps,
                 new_file_distribution: None,
+                new_total_agents:     None,
             })),
         };
         let n = write.registry.broadcast(cmd);
@@ -492,6 +493,29 @@ async fn start_handler(State(state): State<SharedState>) -> impl IntoResponse {
                 warn!(error = %e, "failed to open NDJSON record file — results will not be saved");
             }
         }
+
+        // Broadcast the real agent count to all connected agents so they
+        // compute their per-agent connection and bandwidth shares correctly.
+        // This MUST be sent before the first SliceTick (which fires as soon
+        // as the clock task is spawned below), so we do it here under the
+        // same write lock — the SliceTick cannot enter the channel until
+        // the clock task is spawned after this block.
+        let total_agents = write.registry.len() as u32;
+        let agent_count_cmd = CoachCommand {
+            payload: Some(coach_command::Payload::PlanUpdate(LoadPlanUpdate {
+                // u32::MAX as the boundary keeps all existing slices intact
+                // (retain keeps every slice whose index < u32::MAX = all of them).
+                // We only want to push the real total_agents value; slices and
+                // bandwidth are unchanged.
+                effective_from_slice:  u32::MAX,
+                updated_slices:        vec![],
+                new_bandwidth_bps:     None,
+                new_file_distribution: None,
+                new_total_agents:      Some(total_agents),
+            })),
+        };
+        let n = write.registry.broadcast(agent_count_cmd);
+        info!(total_agents, agents_notified = n, "agent count broadcast");
     }
 
     // Spawn the slice clock as a background task.
@@ -541,6 +565,24 @@ async fn reset_handler(State(state): State<SharedState>) -> impl IntoResponse {
             })),
         )
             .into_response();
+    }
+
+    // Before clearing state, tell any agents still connected (e.g. draining
+    // gracefully after the test) to abort immediately.  This uses try_send
+    // so it never blocks under the write lock; the message is queued in each
+    // agent's channel buffer while the cmd_tx handles still exist.
+    // write.reset() then drops the registry (and those handles) right after,
+    // and the coach transitions to WAITING — so agents can re-register the
+    // moment they finish processing the abort command.
+    let abort_cmd = CoachCommand {
+        payload: Some(coach_command::Payload::Shutdown(ShutdownCmd {
+            graceful: false,
+            reason:   "coach reset — abort and re-register".to_string(),
+        })),
+    };
+    let n = write.registry.broadcast(abort_cmd);
+    if n > 0 {
+        info!(agents = n, "abort ShutdownCmd broadcast to draining agents on reset");
     }
 
     write.reset();
@@ -602,6 +644,7 @@ async fn bandwidth_handler(
                 updated_slices:        vec![],
                 new_bandwidth_bps:     Some(body.total_bandwidth_bps),
                 new_file_distribution: None,
+                new_total_agents:      None,
             })),
         };
         let n = write.registry.broadcast(cmd);

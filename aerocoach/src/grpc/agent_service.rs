@@ -206,6 +206,20 @@ async fn handle_report(state: &SharedState, report: &AgentReport) {
         }
         Some(agent_report::Payload::MetricsUpdate(update)) => {
             let mut write = state.write().await;
+
+            // Discard metrics that arrive after a coach reset.  Once the coach
+            // is back in WAITING state, any incoming MetricsUpdate belongs to
+            // the tail of the previous test run (e.g. the agent’s final flush
+            // after an abort) and must not repopulate the freshly-cleared
+            // MetricsStore with stale error counts.
+            if write.coach_state.is_waiting() {
+                debug!(
+                    agent_id = %agent_id,
+                    "ignoring post-reset MetricsUpdate (coach is WAITING)"
+                );
+                return;
+            }
+
             write
                 .registry
                 .update_active_connections(agent_id, update.active_connections);

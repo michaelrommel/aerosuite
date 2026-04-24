@@ -1,0 +1,20 @@
+{
+	"plan_id": "Parallel Fast",
+	"slice_duration_ms": 30000,
+	"total_bandwidth_bps": 20971520,
+	"file_distribution": {
+		"buckets": [
+			{
+				"bucket_id": "md",
+				"size_min_bytes": 63897600,
+				"size_max_bytes": 63897610,
+				"percentage": 1
+			}
+		]
+	},
+	"slices": [
+		{ "slice_index": 0, "total_connections": 5 },
+		{ "slice_index": 1, "total_connections": 10 },
+		{ "slice_index": 2, "total_connections": 0 }
+	]
+}

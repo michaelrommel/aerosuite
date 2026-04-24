@@ -154,8 +154,12 @@ message LoadPlanUpdate {
     repeated TimeSlice updated_slices = 2;
 
     // Optional field-level overrides (absent = no change).
-    optional uint64              new_bandwidth_bps     = 3;
+    optional uint64               new_bandwidth_bps     = 3;
     optional FileSizeDistribution new_file_distribution = 4;
+
+    // Real agent count, broadcast once at test-start so agents can compute
+    // their per-agent connection and bandwidth shares correctly.
+    optional uint32 new_total_agents = 5;
 }
 
 message ShutdownCmd {

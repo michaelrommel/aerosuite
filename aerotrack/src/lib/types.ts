@@ -21,6 +21,7 @@ export interface AgentSnapshot {
 	current_slice: number;
 	active_connections: number;
 	bytes_transferred: number;
+	bytes_in_flight: number;
 	success_count: number;
 	error_count: number;
 	private_ip: string;

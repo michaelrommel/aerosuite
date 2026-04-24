@@ -131,9 +131,8 @@ impl LoadPlanFile {
         if self.slice_duration_ms == 0 {
             bail!("slice_duration_ms must be greater than zero");
         }
-        if self.total_bandwidth_bps == 0 {
-            bail!("total_bandwidth_bps must be greater than zero");
-        }
+        // total_bandwidth_bps == 0 means unlimited; any positive value is a
+        // bytes-per-second ceiling shared across all agents.
 
         // ── Slices ────────────────────────────────────────────────────────
         if self.slices.is_empty() {
@@ -236,16 +235,10 @@ impl LoadPlanFile {
         self.slices.len() as u32
     }
 
-    /// Best-effort estimate of the total agent count for use when building a
-    /// [`proto::LoadPlan`] during `Register`, before the actual agent count is
-    /// known.  Uses the registered count plus one (the registering agent).
-    ///
-    /// aerocoach overwrites this field when the test actually starts and the
-    /// final agent count is confirmed.
+    /// Returns 1 as a placeholder for the `RegisterResponse`; the real agent
+    /// count is broadcast to all agents via a [`LoadPlanUpdate`] the moment
+    /// `POST /start` fires, before the first `SliceTick`.
     pub fn total_agents_hint(&self) -> u32 {
-        // For now return a sentinel; the slice clock will recompute this with
-        // the real connected count when the test starts.
-        // TODO (Phase B – clock session): pass real agent count here.
         1
     }
 }
@@ -296,10 +289,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_bandwidth_rejected() {
+    fn zero_bandwidth_means_unlimited() {
+        // 0 is the sentinel for "no rate limit" — the validator must accept it.
         let mut p = minimal_plan();
         p.total_bandwidth_bps = 0;
-        assert!(p.validate().is_err());
+        assert!(p.validate().is_ok());
     }
 
     #[test]

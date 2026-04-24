@@ -12,6 +12,7 @@
 			const data = await res.json();
 			coachState      = (data.state as string) ?? 'WAITING';
 			connectedAgents = (data.connected as number) ?? 0;
+			dashboard.setCoachState(coachState);
 		} catch { /* server not reachable yet — silently ignore */ }
 	}
 
@@ -46,6 +47,8 @@
 			const d = await res.json().catch(() => ({})) as { error?: string };
 			alert(d.error ?? `Reset failed (${res.status})`);
 		}
+		// Clear sparkline history so the next run starts with a clean chart.
+		dashboard.clearHistory();
 		await fetchStatus();
 	}
 

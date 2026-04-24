@@ -173,11 +173,18 @@
 					{/if}
 				{/if}
 
-				<!-- Current-slice dot: centred on the active slice band -->
+				<!-- Current-slice dot: tracks time progress across the active slice band -->
 				{#each slices as s}
 					{#if s.slice_index === dashboard.currentSlice}
+						{@const x0       = xFor(s.slice_index)}
+						{@const x1       = xFor(s.slice_index + 1)}
+						{@const progress = (dashboard.coachState.startsWith('RUNNING')
+								&& dashboard.sliceStartMs !== null
+								&& dashboard.lastUpdated  !== null)
+							? Math.min(1, (dashboard.lastUpdated - dashboard.sliceStartMs) / sliceDurMs)
+							: 0.5}
 						<circle
-							cx={(xFor(s.slice_index) + xFor(s.slice_index + 1)) / 2}
+							cx={x0 + progress * (x1 - x0)}
 							cy={yFor(s.total_connections)}
 							r="5.5"
 							fill="#d79921" stroke="#151819" stroke-width="2" />

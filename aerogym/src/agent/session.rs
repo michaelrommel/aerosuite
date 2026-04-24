@@ -34,7 +34,7 @@ use tonic::transport::Channel;
 use tracing::{info, warn};
 
 use aeroproto::aeromonitor::{
-    agent_report, coach_command, AgentReport, MetricsUpdate, SliceAck,
+    agent_report, coach_command, AgentReport, CoachCommand, MetricsUpdate, SliceAck,
     agent_service_client::AgentServiceClient,
 };
 
@@ -197,6 +197,7 @@ pub async fn run(
                                     &mut active_tasks,
                                     &mut metrics,
                                     in_flight,
+                                    &mut inbound,
                                     report_tx,
                                 )
                                 .await;
@@ -274,7 +275,7 @@ async fn handle_slice_tick(
         "slice tick"
     );
 
-    // ── 1. Ack immediately so the clock isn’t stalled ─────────────────────
+    // ── 1. Ack immediately so the clock isn't stalled ─────────────────────
     report_tx
         .send(make_ack_report(&config.agent_id, slice_index))
         .await
@@ -341,7 +342,7 @@ async fn handle_slice_tick(
             let bucket_id  = bucket.bucket_id.clone();
 
             // Record the allocation and in-flight metadata before spawning
-            // so both maps are always consistent with what’s running.
+            // so both maps are always consistent with what's running.
             running_rates.insert(cid, per_new_bps);
 
             let bytes_sent = Arc::new(AtomicU64::new(0));
@@ -382,7 +383,7 @@ async fn handle_slice_tick(
             "ramped up transfers"
         );
     }
-    // Ramp DOWN: do nothing — running transfers complete naturally.
+    // Ramp DOWN: do nothing - running transfers complete naturally.
 
     Ok(())
 }
@@ -403,9 +404,12 @@ async fn shutdown(
     agent_id: &str,
     active_tasks: &mut JoinSet<TransferOutcome>,
     metrics: &mut MetricsAccumulator,
-    // Taken by value so we can record aborted-transfer outcomes and then
-    // drop it explicitly to close the gRPC stream cleanly.
-    in_flight: HashMap<u64, InFlightInfo>,
+    // Taken by value (mut) so we can remove completed entries and synthesise
+    // error records only for tasks that were truly aborted.
+    mut in_flight: HashMap<u64, InFlightInfo>,
+    // Kept open during the graceful drain so we can react to an abort
+    // command (graceful=false) or stream closure (coach reset / network drop).
+    inbound: &mut tonic::Streaming<CoachCommand>,
     report_tx: mpsc::Sender<AgentReport>,
 ) -> Result<()> {
     if graceful {
@@ -419,7 +423,43 @@ async fn shutdown(
             tokio::select! {
                 biased;
 
-                // Drain timeout - abort whatever is left and move on.
+                // ── 1. Coach abort signal ─────────────────────────────────────
+                // Highest priority: react immediately if the coach sends a
+                // non-graceful ShutdownCmd (operator reset) or closes the
+                // stream (cmd_tx dropped when registry is cleared on reset).
+                maybe_cmd = inbound.next() => {
+                    match maybe_cmd {
+                        // Stream closed — coach dropped the connection (reset).
+                        None => {
+                            info!("inbound stream closed during drain — aborting");
+                            active_tasks.shutdown().await;
+                            break;
+                        }
+                        // Explicit non-graceful abort from the coach.
+                        Some(Ok(cmd)) => {
+                            if let Some(coach_command::Payload::Shutdown(ref s)) = cmd.payload {
+                                if !s.graceful {
+                                    info!(
+                                        reason = %s.reason,
+                                        "abort command received during drain — aborting"
+                                    );
+                                    active_tasks.shutdown().await;
+                                    break;
+                                }
+                            }
+                            // Any other command (e.g. a duplicate graceful shutdown)
+                            // is silently ignored — we're already draining.
+                        }
+                        // Network / protocol error — abort to avoid hanging.
+                        Some(Err(e)) => {
+                            warn!(error = %e, "inbound stream error during drain — aborting");
+                            active_tasks.shutdown().await;
+                            break;
+                        }
+                    }
+                }
+
+                // ── 2. Graceful drain timeout ────────────────────────────────
                 _ = &mut deadline => {
                     let remaining = active_tasks.len();
                     if remaining > 0 {
@@ -433,12 +473,13 @@ async fn shutdown(
                     break;
                 }
 
-                // Normal completion path: record outcome, remove from in_flight.
+                // ── 3. Normal transfer completion ────────────────────────────
+                // Record outcome and remove from in_flight so only
+                // truly-aborted entries remain after the loop.
                 result = active_tasks.join_next() => {
                     match result {
                         Some(Ok(outcome))  => {
-                            // in_flight is owned here so we can’t remove; aborted
-                            // entries are handled below after the loop.
+                            in_flight.remove(&outcome.conn_id);
                             metrics.record(outcome);
                         }
                         Some(Err(e))       => warn!(error = %e, "transfer task panicked"),
@@ -461,7 +502,7 @@ async fn shutdown(
             conn_id,
             filename = %info.filename,
             bytes_sent = bytes,
-            "transfer aborted — synthesising error record"
+            "transfer aborted - synthesising error record"
         );
         metrics.record(TransferOutcome {
             conn_id,

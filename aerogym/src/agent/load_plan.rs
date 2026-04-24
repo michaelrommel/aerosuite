@@ -148,6 +148,12 @@ impl AgentPlan {
         if let Some(dist) = update.new_file_distribution {
             self.proto.file_distribution = Some(dist);
         }
+        // Apply the real agent count broadcast by the coach at test-start.
+        if let Some(agents) = update.new_total_agents {
+            if agents > 0 {
+                self.proto.total_agents = agents;
+            }
+        }
     }
 }
 
@@ -248,6 +254,7 @@ mod tests {
             updated_slices: vec![TimeSlice { slice_index: 1, total_connections: 999 }],
             new_bandwidth_bps: None,
             new_file_distribution: None,
+            new_total_agents: None,
         });
         assert_eq!(p.my_connections_for_slice(0), 10); // unchanged
         assert_eq!(p.my_connections_for_slice(1), 999); // replaced
@@ -261,6 +268,7 @@ mod tests {
             updated_slices: vec![],
             new_bandwidth_bps: Some(50_000_000),
             new_file_distribution: None,
+            new_total_agents: None,
         });
         assert_eq!(p.my_bandwidth_bps(), 50_000_000);
     }
