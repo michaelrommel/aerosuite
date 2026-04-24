@@ -127,7 +127,10 @@ async fn main() -> Result<()> {
                     buckets  = plan.file_distribution.buckets.len(),
                     "load plan loaded"
                 );
-                shared.write().await.load_plan = Some(plan);
+                let stem = stem_from_path(path, &plan.plan_id);
+                let mut w = shared.write().await;
+                w.plan_filename_stem = Some(stem);
+                w.load_plan          = Some(plan);
             }
             Err(e) => {
                 warn!(
@@ -273,7 +276,8 @@ async fn main() -> Result<()> {
         .route("/status",    get(status_handler))
         .route("/plan",        get(plan_get_handler).put(plan_put_handler).patch(plan_patch_handler))
         .route("/plans",       get(plans_list_handler))
-        .route("/plan/select", post(plan_select_handler))
+        .route("/plan/select",  post(plan_select_handler))
+        .route("/plan/confirm", post(plan_confirm_handler))
         .route("/start",     post(start_handler))
         .route("/stop",      post(stop_handler))
         .route("/reset",     post(reset_handler))
@@ -387,7 +391,8 @@ async fn plan_put_handler(
 
     let plan_id = body.plan_id.clone();
     info!(plan_id = %plan_id, "plan replaced via PUT /plan");
-    write.load_plan = Some(body);
+    write.load_plan          = Some(body);
+    write.plan_filename_stem = None; // no backing file — fall back to sanitised plan_id at start
     (StatusCode::OK, Json(json!({ "status": "ok", "plan_id": plan_id }))).into_response()
 }
 
@@ -473,7 +478,7 @@ async fn plan_patch_handler(
 /// `POST /start` — transition WAITING → RUNNING and spawn the slice clock.
 async fn start_handler(State(state): State<SharedState>) -> impl IntoResponse {
     // Validate preconditions.
-    let (ack_notify, stop_rx, plan_id, record_dir) = {
+    let (ack_notify, record_prefix, record_dir) = {
         let read = state.read().await;
 
         if !read.coach_state.is_waiting() {
@@ -499,19 +504,32 @@ async fn start_handler(State(state): State<SharedState>) -> impl IntoResponse {
             warn!("POST /start called with no connected agents — clock will tick but no agents receive commands");
         }
 
-        read.reset_stop();
-        let plan_id    = read.load_plan.as_ref().map(|p| p.plan_id.clone()).unwrap_or_default();
+        let record_prefix = read
+            .plan_filename_stem
+            .clone()
+            .unwrap_or_else(|| {
+                let id = read.load_plan.as_ref().map(|p| p.plan_id.as_str()).unwrap_or("plan");
+                safe_record_prefix(id)
+            });
         let record_dir = read.record_dir.clone();
-        (read.ack_notify.clone(), read.subscribe_stop(), plan_id, record_dir)
+        (read.ack_notify.clone(), record_prefix, record_dir)
     };
 
     // Open the NDJSON record writer (synchronous I/O — fast mkdir + open).
-    let writer_result = NdjsonWriter::open(&record_dir, &plan_id);
+    let writer_result = NdjsonWriter::open(&record_dir, &record_prefix);
 
-    // Transition to RUNNING and install the writer.
-    {
+    // Transition to RUNNING, reset the stop signal, install the writer, and
+    // create the stop receiver — all inside the same write lock so that
+    // stop_handler cannot signal a stop between the reset and the receiver
+    // creation (it must acquire a read lock and see RUNNING first).
+    let stop_rx = {
         let mut write = state.write().await;
         write.coach_state = crate::state::CoachState::Running { current_slice: 0 };
+
+        // Replace the stop channel with a fresh one so the clock receiver
+        // starts from a channel that has never had `true` sent on it.
+        // This is immune to any stale value left in the previous channel.
+        let stop_rx = write.renew_stop();
 
         match writer_result {
             Ok(writer) => {
@@ -545,7 +563,9 @@ async fn start_handler(State(state): State<SharedState>) -> impl IntoResponse {
         };
         let n = write.registry.broadcast(agent_count_cmd);
         info!(total_agents, agents_notified = n, "agent count broadcast");
-    }
+
+        stop_rx
+    };
 
     // Spawn the slice clock as a background task.
     let clock = SliceClock::new(state.clone(), ack_notify, stop_rx);
@@ -728,6 +748,57 @@ async fn results_handler(State(state): State<SharedState>) -> impl IntoResponse 
 
 // ── Shutdown signal ───────────────────────────────────────────────────────
 
+// ── Plan confirm ───────────────────────────────────────────────────────────────
+
+/// `POST /plan/confirm` — push the current plan to all connected agents so
+/// they re-register, pick up the new plan, and regenerate any bucket files
+/// whose size is out of range for the new distribution.
+///
+/// Only meaningful in WAITING state (agents are idle in their session loops).
+/// The coach broadcasts a non-graceful [`ShutdownCmd`] to every connected
+/// agent; they abort, close their session, and immediately loop back to
+/// `registration::register()` where they receive the updated plan.
+/// The coach state itself does not change.
+async fn plan_confirm_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let mut write = state.write().await;
+
+    if !write.coach_state.is_waiting() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "cannot confirm plan while in state {}; must be WAITING",
+                    write.coach_state
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    if write.load_plan.is_none() {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": "no plan loaded; select a plan before confirming" })),
+        )
+            .into_response();
+    }
+
+    let cmd = CoachCommand {
+        payload: Some(coach_command::Payload::Shutdown(ShutdownCmd {
+            graceful: false,
+            reason:   "plan confirmed — re-register to receive the updated plan".to_string(),
+        })),
+    };
+    let n = write.registry.broadcast(cmd);
+    info!(
+        agents = n,
+        plan_id = %write.load_plan.as_ref().map(|p| p.plan_id.as_str()).unwrap_or(""),
+        "plan confirmed — ShutdownCmd broadcast to agents"
+    );
+
+    (StatusCode::OK, Json(json!({ "status": "ok", "agents_notified": n }))).into_response()
+}
+
 // ── Plan directory helpers ──────────────────────────────────────────────────
 
 /// Entry returned by `GET /plans`.
@@ -735,6 +806,49 @@ async fn results_handler(State(state): State<SharedState>) -> impl IntoResponse 
 struct PlanEntry {
     filename: String,
     plan_id:  String,
+}
+
+/// Convert a plan file stem (or plan_id fallback) into a string that is safe
+/// to use as a filesystem filename component on all common OS/filesystem
+/// combinations.
+///
+/// Rules: keep ASCII letters, digits, `-`, and `_`; replace everything else
+/// (spaces, colons, slashes, dots …) with `_`; collapse consecutive
+/// underscores; strip leading/trailing underscores.
+fn safe_record_prefix(s: &str) -> String {
+    let raw: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    // Collapse runs of underscores and trim them from the edges.
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_was_underscore = false;
+    for c in raw.chars() {
+        if c == '_' {
+            if !prev_was_underscore && !out.is_empty() {
+                out.push(c);
+            }
+            prev_was_underscore = true;
+        } else {
+            out.push(c);
+            prev_was_underscore = false;
+        }
+    }
+    // Strip a trailing underscore that might remain.
+    if out.ends_with('_') { out.pop(); }
+    if out.is_empty() { out.push_str("plan"); }
+    out
+}
+
+/// Extract the filesystem stem from a plan file path and sanitise it for use
+/// as a record-file prefix.  Falls back to sanitising `plan_id` if the path
+/// has no usable stem.
+fn stem_from_path(path: &std::path::Path, plan_id: &str) -> String {
+    let raw = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(plan_id);
+    safe_record_prefix(raw)
 }
 
 /// Return the path of the alphabetically-last `.json` file in `dir`,
@@ -856,12 +970,20 @@ async fn plan_select_handler(
     match LoadPlanFile::load(&path) {
         Ok(plan) => {
             let plan_id = plan.plan_id.clone();
+            let stem    = safe_record_prefix(
+                std::path::Path::new(&body.filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&plan_id),
+            );
             info!(
-                filename = %body.filename,
-                plan_id  = %plan_id,
+                filename      = %body.filename,
+                plan_id       = %plan_id,
+                record_prefix = %stem,
                 "plan selected via POST /plan/select"
             );
-            write.load_plan = Some(plan);
+            write.load_plan          = Some(plan);
+            write.plan_filename_stem = Some(stem);
             (StatusCode::OK, Json(json!({ "status": "ok", "plan_id": plan_id }))).into_response()
         }
         Err(e) => (

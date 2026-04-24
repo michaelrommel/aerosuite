@@ -31,7 +31,7 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Channel;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use aeroproto::aeromonitor::{
     agent_report, coach_command, AgentReport, CoachCommand, MetricsUpdate, SliceAck,
@@ -130,6 +130,10 @@ pub async fn run(
     let mut running_rates: HashMap<u64, u64> = HashMap::new();
     // Current slice index, updated on every SliceTick for use in heartbeats.
     let mut current_slice: u32 = 0;
+    // Monotonic instant when the current slice started and the connection
+    // target for that slice — used by the refill logic.
+    let mut slice_start  = tokio::time::Instant::now();
+    let mut slice_target: u32 = 0;
 
     // Periodic heartbeat: sends a MetricsUpdate even when no transfer
     // completes, so aerocoach always has fresh active_connections and
@@ -159,6 +163,7 @@ pub async fn run(
 
                             Some(coach_command::Payload::SliceTick(tick)) => {
                                 current_slice = tick.slice_index;
+                                slice_start   = tokio::time::Instant::now();
                                 handle_slice_tick(
                                     tick.slice_index,
                                     config,
@@ -170,6 +175,7 @@ pub async fn run(
                                     &report_tx,
                                     &mut running_rates,
                                     &mut in_flight,
+                                    &mut slice_target,
                                 )
                                 .await?;
                             }
@@ -218,6 +224,76 @@ pub async fn run(
                         // Release bandwidth allocation and in-flight tracking.
                         running_rates.remove(&outcome.conn_id);
                         in_flight.remove(&outcome.conn_id);
+
+                        // ── Refill logic ───────────────────────────────────────────
+                        // If we are still within the refill window and the
+                        // running count dropped below the slice target, spawn
+                        // a replacement using the same bucket so the plan’s
+                        // concurrency level is maintained throughout the slice.
+                        let running      = active_tasks.len() as u32;
+                        let elapsed_ms   = slice_start.elapsed().as_millis() as u64;
+                        let slice_dur_ms = plan.slice_duration_ms();
+                        let window_ms    = (slice_dur_ms as f64
+                                            * config.refill_threshold) as u64;
+
+                        if elapsed_ms < window_ms && running < slice_target {
+                            let bucket_id = outcome.bucket_id.clone();
+                            let agent_bps = plan.my_bandwidth_bps();
+                            let carry_bps: u64 = running_rates.values().sum();
+                            // Rate for the replacement: freed bandwidth slot,
+                            // floored at the ideal per-transfer share.
+                            let ideal_bps = if slice_target > 0 {
+                                agent_bps / slice_target as u64
+                            } else { 0 };
+                            let per_bps = agent_bps
+                                .saturating_sub(carry_bps)
+                                .max(ideal_bps);
+
+                            if let Some(local_file) =
+                                bucket_files.get(&bucket_id).cloned()
+                            {
+                                conn_id += 1;
+                                let cid      = conn_id;
+                                let filename = make_transfer_filename(
+                                    &config.agent_id, current_slice, cid,
+                                );
+                                let rate_cfg = RateLimiterConfig::from_bps(per_bps);
+                                let bs       = Arc::new(AtomicU64::new(0));
+                                // std::fs::metadata is sync — keeps this arm await-free.
+                                let file_size_bytes = std::fs::metadata(&local_file)
+                                    .map(|m| m.len())
+                                    .unwrap_or(0);
+                                running_rates.insert(cid, per_bps);
+                                in_flight.insert(cid, InFlightInfo {
+                                    filename:        filename.clone(),
+                                    bucket_id:       bucket_id.clone(),
+                                    time_slice:      current_slice,
+                                    start_ms:        now_ms(),
+                                    file_size_bytes,
+                                    bytes_sent:      bs.clone(),
+                                });
+                                active_tasks.spawn(run_transfer(
+                                    cid,
+                                    filename,
+                                    bucket_id,
+                                    local_file,
+                                    config.ftp_target.clone(),
+                                    config.ftp_user.clone(),
+                                    config.ftp_pass.clone(),
+                                    rate_cfg,
+                                    current_slice,
+                                    bs,
+                                ));
+                                debug!(
+                                    elapsed_ms,
+                                    window_ms,
+                                    running  = running + 1,
+                                    target   = slice_target,
+                                    "refill: spawned replacement transfer"
+                                );
+                            }
+                        }
+
                         metrics.record(outcome);
                     }
                     Err(e) => warn!(error = %e, "transfer task panicked"),
@@ -254,18 +330,22 @@ pub async fn run(
 // ── Slice tick handler ────────────────────────────────────────────────────
 
 async fn handle_slice_tick(
-    slice_index: u32,
-    config: &Config,
-    plan: &AgentPlan,
+    slice_index:  u32,
+    config:       &Config,
+    plan:         &AgentPlan,
     bucket_files: &HashMap<String, PathBuf>,
     active_tasks: &mut JoinSet<TransferOutcome>,
-    metrics: &mut MetricsAccumulator,
-    conn_id: &mut u64,
-    report_tx: &mpsc::Sender<AgentReport>,
+    metrics:      &mut MetricsAccumulator,
+    conn_id:      &mut u64,
+    report_tx:    &mpsc::Sender<AgentReport>,
     running_rates: &mut HashMap<u64, u64>,
-    in_flight: &mut HashMap<u64, InFlightInfo>,
+    in_flight:    &mut HashMap<u64, InFlightInfo>,
+    // Written with the target connection count for this slice so the
+    // refill logic in the completion handler can consult it.
+    slice_target: &mut u32,
 ) -> Result<()> {
     let my_target = plan.my_connections_for_slice(slice_index);
+    *slice_target = my_target;
     let running = active_tasks.len() as u32;
 
     info!(

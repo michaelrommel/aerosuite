@@ -29,10 +29,18 @@ impl NdjsonWriter {
     ///
     /// Creates `record_dir` and all parent directories if they do not exist.
     /// The filename format is `<plan_id>_<timestamp>.ndjson`.
-    pub fn open(record_dir: &Path, plan_id: &str) -> Result<Self> {
+    pub fn open(record_dir: &Path, prefix: &str) -> Result<Self> {
         std::fs::create_dir_all(record_dir)?;
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-        let filename = format!("{plan_id}_{ts}.ndjson");
+        // Sanitise the prefix one final time so the writer is safe even when
+        // called from code paths that skipped the main sanitisation step.
+        let safe: String = prefix
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let safe = safe.trim_matches('_');
+        let safe = if safe.is_empty() { "plan" } else { safe };
+        let filename = format!("{safe}_{ts}.ndjson");
         let path = record_dir.join(&filename);
         info!(path = %path.display(), "opening NDJSON record file");
         let file = std::fs::OpenOptions::new()

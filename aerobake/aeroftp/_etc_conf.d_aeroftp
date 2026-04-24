@@ -3,3 +3,36 @@ export AWS_S3_BUCKET=dev-s3-aeroftp
 export FTP_PASSIVE_PORT_START=xxxxx
 export FTP_PASSIVE_PORT_END=xxxxx
 export RUST_LOG=info
+
+# ── Resource limits ───────────────────────────────────────────────────────────────
+#
+# Each concurrent FTP session in passive mode consumes:
+#   1 FD  control socket (client → port 21)
+#   1 FD  TcpListener on a passive port (open until client connects)
+#   1 FD  data socket  (open for the duration of the transfer)
+# = 2–3 FDs per session at peak, plus TIME_WAIT sockets that linger
+#   in the kernel after close.
+#
+# Additional overhead per process:
+#   ~50 FDs  reqwest/opendal S3 connection pool
+#   ~30 FDs  tokio runtime (epoll fd, timer fds, waker pipes, …)
+#    ~5 FDs  stdout / stderr / log file / credentials file
+#
+# Budget for the passive port range (1 500 ports, 41000–42499):
+#   1 500 ports × 3 FDs/session  = 4 500 FDs from sockets alone
+#   + S3 / tokio overhead        =   ~85 FDs
+#   Total ceiling                ≈ 4 600 FDs
+#
+# The kernel default soft limit of 1 024 is hit as soon as ~340 sessions
+# are open simultaneously — well below the 800-connection peak of slice 2.
+# The system-wide fs.file-max = 200 000 (set in 50-aeroftp.conf) is a
+# kernel-wide ceiling, NOT a per-process limit; the process soft limit
+# must be raised separately here.
+#
+# 65 536 provides comfortable headroom above the 4 600 FD ceiling and
+# is well within the system fs.file-max of 200 000.
+#
+# OpenRC’s supervise-daemon reads rc_ulimit while still running as root
+# (before dropping to command_user=aeroftp), so it can raise the limit
+# beyond the aeroftp user’s default soft limit.
+rc_ulimit="-n 65536"

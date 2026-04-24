@@ -1,12 +1,17 @@
 <script lang="ts">
 	import { dashboard } from '$lib/stores/dashboard.svelte';
 	import { plan } from '$lib/stores/plan.svelte';
+	import { formatBandwidth } from '$lib/utils/format';
 	import type { PlanEntry, SliceSpec } from '$lib/types';
 
 	// ── Plan directory dropdown ──────────────────────────────────────────
 
-	let availablePlans = $state<PlanEntry[]>([]);
-	let selectError   = $state<string | null>(null);
+	let availablePlans    = $state<PlanEntry[]>([]);
+	let selectError       = $state<string | null>(null);
+	let confirming        = $state(false);
+	let confirmError      = $state<string | null>(null);
+	/** Filename of the last successfully confirmed plan, or null. */
+	let confirmedFilename = $state<string | null>(null);
 
 	// Fetch the plan list once when in WAITING state and a plan directory
 	// is configured.  Re-fetches automatically whenever coachState changes.
@@ -18,15 +23,32 @@
 			.catch(() => { availablePlans = []; });
 	});
 
-	const isWaiting   = $derived(dashboard.coachState.startsWith('WAITING'));
-	const showDropdown = $derived(isWaiting && availablePlans.length > 0);
+	// Clear confirmed state on DONE → WAITING (reset) so a fresh
+	// confirmation is required for the next run.
+	let prevCoachState = $state(dashboard.coachState);
+	$effect(() => {
+		const cur = dashboard.coachState;
+		if (prevCoachState.startsWith('DONE') && cur.startsWith('WAITING')) {
+			confirmedFilename = null;
+		}
+		prevCoachState = cur;
+	});
+
+	const isWaiting       = $derived(dashboard.coachState.startsWith('WAITING'));
+	const hasPlanDir      = $derived(availablePlans.length > 0);
+	const showDropdown    = $derived(isWaiting && hasPlanDir);
 	const currentFilename = $derived(
 		availablePlans.find((p) => p.plan_id === plan.committed?.plan_id)?.filename ?? ''
+	);
+	/** True when the currently selected plan has been confirmed to all agents. */
+	const isConfirmed     = $derived(
+		confirmedFilename !== null && confirmedFilename === currentFilename
 	);
 
 	async function selectPlan(filename: string) {
 		if (!filename) return;
-		selectError = null;
+		selectError  = null;
+		confirmError = null;
 		try {
 			const res = await fetch('/plan/select', {
 				method: 'POST',
@@ -38,10 +60,27 @@
 				selectError = d.error ?? `Failed to load plan (${res.status})`;
 				return;
 			}
-			// Reload the plan from the server so the graph updates.
 			await plan.reload();
 		} catch (e) {
 			selectError = String(e);
+		}
+	}
+
+	async function confirmPlan() {
+		confirming   = true;
+		confirmError = null;
+		try {
+			const res = await fetch('/plan/confirm', { method: 'POST' });
+			if (!res.ok) {
+				const d = await res.json().catch(() => ({})) as { error?: string };
+				confirmError = d.error ?? `Confirm failed (${res.status})`;
+			} else {
+				confirmedFilename = currentFilename;
+			}
+		} catch (e) {
+			confirmError = String(e);
+		} finally {
+			confirming = false;
 		}
 	}
 
@@ -49,7 +88,7 @@
 	const W = 600, H = 185;
 	// PAD.top expands in edit mode so the ▲/▼ nudge buttons above high segments
 	// stay inside the SVG viewBox and don't get clipped by the edit toolbar.
-	const PAD    = { right: 14, bottom: 26, left: 44 };
+	const PAD    = { right: 14, bottom: 4, left: 44 };
 	const IW     = W - PAD.left - PAD.right;
 	const padTop = $derived(plan.isEditing ? 46 : 16);
 	const IH     = $derived(H - padTop - PAD.bottom);
@@ -59,10 +98,22 @@
 	const slices      = $derived(displayPlan?.slices ?? []);
 	const maxConns    = $derived(Math.max(...slices.map((s) => s.total_connections), 1));
 	const sliceDurMs  = $derived(displayPlan?.slice_duration_ms ?? 60_000);
-	const totalMs     = $derived(slices.length * sliceDurMs);
-	const useSeconds  = $derived(totalMs < 120_000);  // < 2 min → show seconds
 	const bwMbps      = $derived(
 		displayPlan ? (displayPlan.total_bandwidth_bps / 1_000_000).toFixed(0) : '0'
+	);
+	// Formatted values for the footer stat tiles.
+	const durationLabel = $derived((() => {
+		if (!displayPlan) return '—';
+		const ms = displayPlan.slice_duration_ms;
+		if (ms < 60_000) return `${(ms / 1_000).toFixed(0)} s`;
+		const m = Math.floor(ms / 60_000);
+		const s = Math.round((ms % 60_000) / 1_000);
+		return s > 0 ? `${m} m ${s} s` : `${m} m`;
+	})());
+	const bandwidthLabel = $derived(
+		!displayPlan ? '—'
+		: displayPlan.total_bandwidth_bps === 0 ? 'Unlimited'
+		: formatBandwidth(displayPlan.total_bandwidth_bps)
 	);
 
 	// xFor(i) = x coordinate of the LEFT EDGE of slice i.
@@ -77,12 +128,12 @@
 	}
 	function yBase(): number { return padTop + IH; }
 
-	// Auto-scaled x-axis time label for a slice boundary.
+	// Slice-boundary label used only in the hover tooltip.
 	function timeLabel(boundaryIdx: number): string {
 		const ms = boundaryIdx * sliceDurMs;
-		return useSeconds
-			? `${(ms / 1_000).toFixed(0)}s`
-			: `${(ms / 60_000).toFixed(0)}m`;
+		return ms < 120_000
+			? `${(ms / 1_000).toFixed(0)} s`
+			: `${(ms / 60_000).toFixed(0)} m`;
 	}
 
 	// Step-graph SVG path.
@@ -143,6 +194,7 @@
 			<select
 				class="plan-select"
 				value={currentFilename}
+				disabled={confirming}
 				onchange={(e) => selectPlan((e.target as HTMLSelectElement).value)}
 			>
 				{#each availablePlans as entry}
@@ -152,15 +204,37 @@
 			{#if selectError}
 				<span class="select-error">⚠ {selectError}</span>
 			{/if}
+			{#if confirmError}
+				<span class="select-error">⚠ {confirmError}</span>
+			{/if}
 		{:else if displayPlan}
 			<span class="plan-id">{displayPlan.plan_id}</span>
 		{/if}
 
 		<div class="hdr-actions">
 			{#if !plan.isEditing}
-				<button class="btn" onclick={() => plan.reload()} title="Reload plan from server">
-					↺ Reload
-				</button>
+				{#if hasPlanDir}
+					<!-- Plan-dir mode: Confirm Plan / Confirmed status button -->
+					{#if isConfirmed || isWaiting}
+						<button
+							class="btn {isConfirmed ? 'confirmed' : 'accent'}"
+							disabled={confirming || isConfirmed || !isWaiting || !plan.committed}
+							onclick={confirmPlan}
+							title={isConfirmed
+								? 'Plan confirmed — agents have been notified'
+								: 'Push selected plan to all agents'}
+						>
+							{#if confirming}⏳ Confirming…
+							{:else if isConfirmed}✓ Confirmed
+							{:else}✓ Confirm Plan{/if}
+						</button>
+					{/if}
+				{:else if isWaiting}
+					<!-- Single-file mode: Reload only in WAITING -->
+					<button class="btn" onclick={() => plan.reload()} title="Reload plan from server">
+						↺ Reload
+					</button>
+				{/if}
 				<button class="btn accent" onclick={() => plan.enterEditMode()}>
 					✏ Edit Plan
 				</button>
@@ -287,6 +361,18 @@
 					{timeLabel(tooltip.slice.slice_index)} – {timeLabel(tooltip.slice.slice_index + 1)}
 				</div>
 			{/if}
+		</div>
+
+		<!-- Footer: plan parameters in stat-tile style -->
+		<div class="plan-footer">
+			<div class="stat-tile">
+				<div class="stat-label">Slice Duration</div>
+				<div class="stat-value">{durationLabel}</div>
+			</div>
+			<div class="stat-tile">
+				<div class="stat-label">Total Bandwidth</div>
+				<div class="stat-value">{bandwidthLabel}</div>
+			</div>
 		</div>
 	{/if}
 </div>
@@ -450,4 +536,44 @@
 		color: var(--yellow-br);
 	}
 	.btn.accent:hover { background: var(--bg2); }
+
+	.btn.confirmed {
+		background: var(--bg1);
+		border-color: var(--green-br);
+		color: var(--green-br);
+		cursor: default;
+	}
+
+	/* ── Footer stat tiles ───────────────────────────── */
+	.plan-footer {
+		display: flex;
+		gap: 8px;
+		padding-top: 6px;
+		flex-shrink: 0;
+	}
+
+	.stat-tile {
+		flex: 1;
+		background: var(--bg2);
+		border: 1px solid var(--bg3);
+		border-radius: 5px;
+		padding: 5px 10px;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+	}
+
+	.stat-label {
+		font-size: 0.60rem;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--fg4);
+	}
+
+	.stat-value {
+		font-size: 1.0rem;
+		font-weight: 700;
+		color: var(--fg);
+		white-space: nowrap;
+	}
 </style>

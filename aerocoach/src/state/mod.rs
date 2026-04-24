@@ -122,6 +122,13 @@ pub struct AppState {
     /// `None` when the single-file mode (`AEROCOACH_PLAN_FILE`) is used.
     pub plan_dir: Option<PathBuf>,
 
+    /// Filesystem stem of the plan file that is currently loaded, e.g.
+    /// `"01_parallel_fast"` for `01_parallel_fast.json`.  Used as the prefix
+    /// for NDJSON record file names so the filename on disk is predictable and
+    /// never contains characters that are illegal on any common filesystem.
+    /// `None` when the plan was supplied via `PUT /plan` (no backing file).
+    pub plan_filename_stem: Option<String>,
+
     /// Open record writer for the current test run.  `Some` from
     /// `POST /start` until the delta ticker flushes it on DONE, or until
     /// `reset()` drops it.
@@ -144,10 +151,11 @@ impl AppState {
             ack_notify:       Arc::new(Notify::new()),
             stop_tx,
             ws_tx,
-            record_dir:       PathBuf::from("/data/records"),
-            plan_dir:         None,
-            record_writer:    None,
-            record_file_path: None,
+            record_dir:         PathBuf::from("/data/records"),
+            plan_dir:           None,
+            plan_filename_stem: None,
+            record_writer:      None,
+            record_file_path:   None,
         }
     }
 
@@ -196,12 +204,17 @@ impl AppState {
         let _ = self.stop_tx.send(false);
     }
 
-    /// Create a new [`watch::Receiver`] for the stop signal.
+    /// Replace the stop channel with a brand-new one and return the receiver.
     ///
-    /// Pass to [`crate::model::clock::SliceClock::new`] before spawning the
-    /// clock task.
-    pub fn subscribe_stop(&self) -> watch::Receiver<bool> {
-        self.stop_tx.subscribe()
+    /// Call this inside the write lock when transitioning to `Running` so the
+    /// clock task always gets a receiver from a channel that has never had
+    /// `true` sent on it.  The old sender is dropped; any receivers from the
+    /// previous test run would see `RecvError`, but by the time this is called
+    /// the previous clock has already finished and no live receivers exist.
+    pub fn renew_stop(&mut self) -> watch::Receiver<bool> {
+        let (tx, rx) = watch::channel(false);
+        self.stop_tx = tx;
+        rx
     }
 }
 
@@ -259,9 +272,10 @@ mod tests {
 
     #[test]
     fn stop_signal_round_trip() {
-        let state = AppState::new();
-        let mut rx = state.subscribe_stop();
-        assert!(!*rx.borrow()); // initially false
+        let mut state = AppState::new();
+        // renew_stop() gives a fresh receiver and is how start_handler obtains one.
+        let mut rx = state.renew_stop();
+        assert!(!*rx.borrow()); // fresh channel starts at false
         state.signal_stop();
         assert!(*rx.borrow_and_update()); // now true
         state.reset_stop();

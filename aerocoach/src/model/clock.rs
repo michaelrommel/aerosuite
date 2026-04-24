@@ -276,12 +276,11 @@ mod tests {
     }
 
     fn make_clock(state: &SharedState) -> SliceClock {
-        let read = state.try_read().unwrap();
-        SliceClock::new(
-            state.clone(),
-            read.ack_notify.clone(),
-            read.subscribe_stop(),
-        )
+        let mut write = state.try_write().unwrap();
+        let stop_rx    = write.renew_stop();
+        let ack_notify = write.ack_notify.clone();
+        drop(write);
+        SliceClock::new(state.clone(), ack_notify, stop_rx)
     }
 
     async fn load_plan(state: &SharedState, n_slices: u32, slice_ms: u64) {

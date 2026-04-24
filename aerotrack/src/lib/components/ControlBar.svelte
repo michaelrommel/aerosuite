@@ -89,16 +89,6 @@
 		<button class="btn reset" onclick={reset}>↺ Reset</button>
 	{/if}
 
-	<!-- Edit Plan — always visible when a plan is loaded -->
-	<button
-		class="btn edit"
-		onclick={() => plan.enterEditMode()}
-		disabled={plan.isEditing || !plan.committed}
-		title="Edit load plan"
-	>
-		✏ Edit Plan
-	</button>
-
 	<!-- Logout — always far-right -->
 	<form method="POST" action="/login?/logout" style="display:contents">
 		<button type="submit" class="btn logout" title="Sign out">⏻</button>

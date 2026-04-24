@@ -1,15 +1,16 @@
 //! Agent configuration parsed from environment variables.
 //!
-//! | Variable              | Required | Default          | Description                        |
-//! |-----------------------|----------|------------------|------------------------------------|
-//! | `AEROGYM_AGENT_ID`    | **Yes**  | —                | Identifier, e.g. `a00`–`a99`       |
-//! | `AEROCOACH_URL`       | **Yes**  | —                | gRPC endpoint `http://host:port`    |
-//! | `AEROSTRESS_TARGET`   | **Yes**  | —                | FTP server `host:port`              |
-//! | `AEROSTRESS_USER`     | No       | `test`           | FTP login username                  |
-//! | `AEROSTRESS_PASS`     | No       | `secret`         | FTP login password                  |
-//! | `AEROGYM_WORK_DIR`    | No       | `/tmp/aerogym`   | Directory for pre-generated files   |
-//! | `AEROGYM_PRIVATE_IP`  | No       | `""`             | Override for private IP metadata    |
-//! | `AEROGYM_INSTANCE_ID` | No       | `""`             | Override for instance-id metadata   |
+//! | Variable                    | Required | Default          | Description                                     |
+//! |-----------------------------|----------|------------------|-------------------------------------------------|
+//! | `AEROGYM_AGENT_ID`          | **Yes**  | —                | Identifier, e.g. `a00`–`a99`                   |
+//! | `AEROCOACH_URL`             | **Yes**  | —                | gRPC endpoint `http://host:port`                |
+//! | `AEROSTRESS_TARGET`         | **Yes**  | —                | FTP server `host:port`                          |
+//! | `AEROSTRESS_USER`           | No       | `test`           | FTP login username                              |
+//! | `AEROSTRESS_PASS`           | No       | `secret`         | FTP login password                              |
+//! | `AEROGYM_WORK_DIR`          | No       | `/tmp/aerogym`   | Directory for pre-generated files               |
+//! | `AEROGYM_PRIVATE_IP`        | No       | `""`             | Override for private IP metadata                |
+//! | `AEROGYM_INSTANCE_ID`       | No       | `""`             | Override for instance-id metadata               |
+//! | `AEROGYM_REFILL_THRESHOLD`  | No       | `0.80`           | Replace completed transfers before this slice % |
 
 use std::path::PathBuf;
 
@@ -42,6 +43,14 @@ pub struct Config {
 
     /// Instance / task ID reported to aerocoach at registration.
     pub instance_id: String,
+
+    /// Fraction of a time slice (0.0–1.0] within which a completed transfer
+    /// is automatically replaced to keep the connection count at the plan
+    /// target.  At or beyond this fraction the slot is left empty so the
+    /// slice winds down naturally.
+    ///
+    /// Default: `0.80` (replace completions during the first 80 % of a slice).
+    pub refill_threshold: f64,
 }
 
 impl Config {
@@ -72,6 +81,17 @@ impl Config {
         let ftp_target = get("AEROSTRESS_TARGET")
             .context("AEROSTRESS_TARGET is required (e.g. 10.0.2.10:21)")?;
 
+        let refill_threshold = match get("AEROGYM_REFILL_THRESHOLD") {
+            Some(s) => {
+                let v: f64 = s.parse().context("AEROGYM_REFILL_THRESHOLD must be a number")?;
+                if !(0.0..=1.0).contains(&v) {
+                    bail!("AEROGYM_REFILL_THRESHOLD must be in the range 0.0–1.0, got {v}");
+                }
+                v
+            }
+            None => 0.80,
+        };
+
         Ok(Self {
             agent_id,
             aerocoach_url,
@@ -83,6 +103,7 @@ impl Config {
             ),
             private_ip:  get("AEROGYM_PRIVATE_IP").unwrap_or_default(),
             instance_id: get("AEROGYM_INSTANCE_ID").unwrap_or_default(),
+            refill_threshold,
         })
     }
 }
@@ -148,5 +169,26 @@ mod tests {
         let cfg = Config::from_source(src(&pairs)).unwrap();
         assert_eq!(cfg.private_ip,  "10.0.1.99");
         assert_eq!(cfg.instance_id, "arn:aws:ecs:us-east-1:123456789012:task/abc");
+    }
+
+    #[test]
+    fn refill_threshold_default() {
+        let cfg = Config::from_source(src(&required())).unwrap();
+        assert!((cfg.refill_threshold - 0.80).abs() < 1e-9);
+    }
+
+    #[test]
+    fn refill_threshold_custom() {
+        let mut pairs = required();
+        pairs.push(("AEROGYM_REFILL_THRESHOLD", "0.6"));
+        let cfg = Config::from_source(src(&pairs)).unwrap();
+        assert!((cfg.refill_threshold - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn refill_threshold_out_of_range() {
+        let mut pairs = required();
+        pairs.push(("AEROGYM_REFILL_THRESHOLD", "1.5"));
+        assert!(Config::from_source(src(&pairs)).is_err());
     }
 }
