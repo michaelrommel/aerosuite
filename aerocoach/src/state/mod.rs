@@ -118,6 +118,10 @@ pub struct AppState {
     /// Directory where NDJSON result files are written (from env config).
     pub record_dir: PathBuf,
 
+    /// Optional directory of JSON plan files, set from `AEROCOACH_PLAN_DIR`.
+    /// `None` when the single-file mode (`AEROCOACH_PLAN_FILE`) is used.
+    pub plan_dir: Option<PathBuf>,
+
     /// Open record writer for the current test run.  `Some` from
     /// `POST /start` until the delta ticker flushes it on DONE, or until
     /// `reset()` drops it.
@@ -141,6 +145,7 @@ impl AppState {
             stop_tx,
             ws_tx,
             record_dir:       PathBuf::from("/data/records"),
+            plan_dir:         None,
             record_writer:    None,
             record_file_path: None,
         }

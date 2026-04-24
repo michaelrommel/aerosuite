@@ -52,6 +52,6 @@ goto_gym() {
 }
 
 # Launch agents pointing at aerocoach's public gRPC port
-for i in {1..1}; do
+for i in {1..3}; do
 	goto_gym "0$i"
 done

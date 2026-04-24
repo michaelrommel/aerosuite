@@ -3,12 +3,13 @@
 //! All variables are optional and fall back to documented defaults so the
 //! binary can be started without any environment setup during development.
 //!
-//! | Variable                | Default          | Description                              |
-//! |-------------------------|------------------|------------------------------------------|
-//! | `AEROCOACH_GRPC_PORT`   | `50051`          | gRPC listen port                         |
-//! | `AEROCOACH_HTTP_PORT`   | `8080`           | HTTP + WebSocket listen port             |
-//! | `AEROCOACH_PLAN_FILE`   | *(none)*         | Path to JSON load-plan file              |
-//! | `AEROCOACH_RECORD_DIR`  | `/data/records`  | Directory for NDJSON result files        |
+//! | Variable                | Default          | Description                                              |
+//! |-------------------------|------------------|----------------------------------------------------------|
+//! | `AEROCOACH_GRPC_PORT`   | `50051`          | gRPC listen port                                         |
+//! | `AEROCOACH_HTTP_PORT`   | `8080`           | HTTP + WebSocket listen port                             |
+//! | `AEROCOACH_PLAN_DIR`    | *(none)*         | Directory of JSON plan files; last alphabetically loaded |
+//! | `AEROCOACH_PLAN_FILE`   | *(none)*         | Path to a single JSON plan file (ignored if DIR is set)  |
+//! | `AEROCOACH_RECORD_DIR`  | `/data/records`  | Directory for NDJSON result files                        |
 
 use std::path::PathBuf;
 
@@ -23,9 +24,14 @@ pub struct Config {
     /// HTTP + WebSocket listen port.
     pub http_port: u16,
 
-    /// Optional path to a JSON load-plan file.
-    /// When set the plan is loaded at startup; it can still be replaced at
-    /// runtime via `PUT /plan` while aerocoach is in the WAITING state.
+    /// Optional directory of JSON load-plan files.
+    /// When set, the file with the last name in alphabetical order is loaded
+    /// at startup and the UI may switch plans via `POST /plan/select`.
+    /// Takes precedence over `plan_file` when both are provided.
+    pub plan_dir: Option<PathBuf>,
+
+    /// Optional path to a single JSON load-plan file.
+    /// Ignored when `plan_dir` is set.
     pub plan_file: Option<PathBuf>,
 
     /// Directory where NDJSON result files are written after each test run.
@@ -55,6 +61,7 @@ impl Config {
                 .context("AEROCOACH_GRPC_PORT must be a valid port number (0–65535)")?,
             http_port: parse_opt(get("AEROCOACH_HTTP_PORT"), 8080)
                 .context("AEROCOACH_HTTP_PORT must be a valid port number (0–65535)")?,
+            plan_dir:  get("AEROCOACH_PLAN_DIR").map(PathBuf::from),
             plan_file: get("AEROCOACH_PLAN_FILE").map(PathBuf::from),
             record_dir: PathBuf::from(
                 get("AEROCOACH_RECORD_DIR").unwrap_or_else(|| "/data/records".into()),
@@ -98,6 +105,7 @@ mod tests {
         let cfg = Config::from_source(|_| None).unwrap();
         assert_eq!(cfg.grpc_port, 50051);
         assert_eq!(cfg.http_port, 8080);
+        assert!(cfg.plan_dir.is_none());
         assert!(cfg.plan_file.is_none());
         assert_eq!(cfg.record_dir, PathBuf::from("/data/records"));
     }
@@ -131,6 +139,17 @@ mod tests {
             cfg.plan_file,
             Some(PathBuf::from("/etc/aerocoach/plan.json"))
         );
+        assert!(cfg.plan_dir.is_none());
+    }
+
+    #[test]
+    fn plan_dir_captured() {
+        let cfg = Config::from_source(src(&[
+            ("AEROCOACH_PLAN_DIR", "/etc/aerocoach/plans"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.plan_dir, Some(PathBuf::from("/etc/aerocoach/plans")));
+        assert!(cfg.plan_file.is_none());
     }
 
     #[test]

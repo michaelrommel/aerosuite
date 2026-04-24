@@ -85,11 +85,38 @@ async fn main() -> Result<()> {
 
     // ── Shared state ──────────────────────────────────────────────────────
     let shared = new_shared_state();
-    // Store the record directory so HTTP handlers can open the NDJSON writer.
-    shared.write().await.record_dir = config.record_dir.clone();
+    // Store the record directory and plan directory so HTTP handlers can use them.
+    {
+        let mut w = shared.write().await;
+        w.record_dir = config.record_dir.clone();
+        w.plan_dir   = config.plan_dir.clone();
+    }
 
     // ── Load plan (optional) ──────────────────────────────────────────────
-    if let Some(ref path) = config.plan_file {
+    //
+    // AEROCOACH_PLAN_DIR takes precedence: load the alphabetically-last .json
+    // file from the directory.  Falls back to AEROCOACH_PLAN_FILE when the
+    // directory variable is absent.
+    let startup_plan_path: Option<std::path::PathBuf> = if let Some(ref dir) = config.plan_dir {
+        match last_plan_in_dir(dir) {
+            Ok(Some(path)) => {
+                info!(path = %path.display(), "plan directory: loading last alphabetical plan");
+                Some(path)
+            }
+            Ok(None) => {
+                warn!(dir = %dir.display(), "plan directory is empty — no plan loaded");
+                None
+            }
+            Err(e) => {
+                warn!(dir = %dir.display(), error = %e, "cannot read plan directory");
+                None
+            }
+        }
+    } else {
+        config.plan_file.clone()
+    };
+
+    if let Some(ref path) = startup_plan_path {
         match LoadPlanFile::load(path) {
             Ok(plan) => {
                 info!(
@@ -110,8 +137,8 @@ async fn main() -> Result<()> {
                 );
             }
         }
-    } else {
-        info!("no AEROCOACH_PLAN_FILE set — supply one via PUT /plan before starting");
+    } else if config.plan_dir.is_none() {
+        info!("no AEROCOACH_PLAN_FILE or AEROCOACH_PLAN_DIR set — supply a plan via PUT /plan");
     }
 
     // ── Delta ticker (broadcasts DashboardUpdate every 3 s) ───────────────
@@ -244,7 +271,9 @@ async fn main() -> Result<()> {
     let http_app = Router::new()
         .route("/health",    get(health_handler))
         .route("/status",    get(status_handler))
-        .route("/plan",      get(plan_get_handler).put(plan_put_handler).patch(plan_patch_handler))
+        .route("/plan",        get(plan_get_handler).put(plan_put_handler).patch(plan_patch_handler))
+        .route("/plans",       get(plans_list_handler))
+        .route("/plan/select", post(plan_select_handler))
         .route("/start",     post(start_handler))
         .route("/stop",      post(stop_handler))
         .route("/reset",     post(reset_handler))
@@ -698,6 +727,150 @@ async fn results_handler(State(state): State<SharedState>) -> impl IntoResponse 
 }
 
 // ── Shutdown signal ───────────────────────────────────────────────────────
+
+// ── Plan directory helpers ──────────────────────────────────────────────────
+
+/// Entry returned by `GET /plans`.
+#[derive(serde::Serialize)]
+struct PlanEntry {
+    filename: String,
+    plan_id:  String,
+}
+
+/// Return the path of the alphabetically-last `.json` file in `dir`,
+/// or `None` if the directory contains no `.json` files.
+fn last_plan_in_dir(dir: &std::path::Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    use anyhow::Context as _;
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("cannot read plan directory {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    entries.sort();
+    Ok(entries.into_iter().last())
+}
+
+/// `GET /plans` — list all `.json` files in the plan directory with their
+/// human-readable `plan_id`, sorted alphabetically by filename.
+async fn plans_list_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let plan_dir = state.read().await.plan_dir.clone();
+
+    let Some(dir) = plan_dir else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no plan directory configured (AEROCOACH_PLAN_DIR not set)" })),
+        )
+            .into_response();
+    };
+
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    entries.sort();
+
+    let plans: Vec<PlanEntry> = entries
+        .into_iter()
+        .filter_map(|path| {
+            let filename = path.file_name()?.to_string_lossy().into_owned();
+            // Best-effort: read plan_id from the file; skip unparseable files.
+            let plan_id = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v["plan_id"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| filename.clone());
+            Some(PlanEntry { filename, plan_id })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(json!(plans))).into_response()
+}
+
+/// Request body for `POST /plan/select`.
+#[derive(Deserialize)]
+struct SelectPlanRequest {
+    filename: String,
+}
+
+/// `POST /plan/select` — load a plan by filename from the plan directory.
+///
+/// Only accepted in WAITING state.  The filename must name a `.json` file
+/// inside the configured plan directory; path traversal is rejected.
+async fn plan_select_handler(
+    State(state): State<SharedState>,
+    Json(body): Json<SelectPlanRequest>,
+) -> impl IntoResponse {
+    let plan_dir = state.read().await.plan_dir.clone();
+
+    let Some(dir) = plan_dir else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no plan directory configured (AEROCOACH_PLAN_DIR not set)" })),
+        )
+            .into_response();
+    };
+
+    // Guard against path traversal.
+    if body.filename.contains('/') || body.filename.contains('\\') || body.filename.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "filename must not contain path separators" })),
+        )
+            .into_response();
+    }
+    if !body.filename.ends_with(".json") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "filename must end with .json" })),
+        )
+            .into_response();
+    }
+
+    let path = dir.join(&body.filename);
+
+    let mut write = state.write().await;
+    if !write.coach_state.is_waiting() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "cannot select plan while in state {}; must be WAITING",
+                    write.coach_state
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    match LoadPlanFile::load(&path) {
+        Ok(plan) => {
+            let plan_id = plan.plan_id.clone();
+            info!(
+                filename = %body.filename,
+                plan_id  = %plan_id,
+                "plan selected via POST /plan/select"
+            );
+            write.load_plan = Some(plan);
+            (StatusCode::OK, Json(json!({ "status": "ok", "plan_id": plan_id }))).into_response()
+        }
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
 
 async fn wait_for_shutdown() {
     use tokio::signal::unix::{signal, SignalKind};

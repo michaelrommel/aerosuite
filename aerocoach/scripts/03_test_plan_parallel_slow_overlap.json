@@ -1,5 +1,5 @@
 {
-	"plan_id": "Parallel Slow",
+	"plan_id": "Short Parallel 5MB/s (Overlapping Slices)",
 	"slice_duration_ms": 35000,
 	"total_bandwidth_bps": 5242880,
 	"file_distribution": {

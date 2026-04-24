@@ -1,7 +1,49 @@
 <script lang="ts">
 	import { dashboard } from '$lib/stores/dashboard.svelte';
 	import { plan } from '$lib/stores/plan.svelte';
-	import type { SliceSpec } from '$lib/types';
+	import type { PlanEntry, SliceSpec } from '$lib/types';
+
+	// ── Plan directory dropdown ──────────────────────────────────────────
+
+	let availablePlans = $state<PlanEntry[]>([]);
+	let selectError   = $state<string | null>(null);
+
+	// Fetch the plan list once when in WAITING state and a plan directory
+	// is configured.  Re-fetches automatically whenever coachState changes.
+	$effect(() => {
+		if (!dashboard.coachState.startsWith('WAITING')) return;
+		fetch('/plans')
+			.then((r) => (r.ok ? r.json() : Promise.reject(r)))
+			.then((data: PlanEntry[]) => { availablePlans = data; })
+			.catch(() => { availablePlans = []; });
+	});
+
+	const isWaiting   = $derived(dashboard.coachState.startsWith('WAITING'));
+	const showDropdown = $derived(isWaiting && availablePlans.length > 0);
+	const currentFilename = $derived(
+		availablePlans.find((p) => p.plan_id === plan.committed?.plan_id)?.filename ?? ''
+	);
+
+	async function selectPlan(filename: string) {
+		if (!filename) return;
+		selectError = null;
+		try {
+			const res = await fetch('/plan/select', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ filename }),
+			});
+			if (!res.ok) {
+				const d = await res.json().catch(() => ({})) as { error?: string };
+				selectError = d.error ?? `Failed to load plan (${res.status})`;
+				return;
+			}
+			// Reload the plan from the server so the graph updates.
+			await plan.reload();
+		} catch (e) {
+			selectError = String(e);
+		}
+	}
 
 	// ── SVG canvas ──────────────────────────────────────────────────────────
 	const W = 600, H = 185;
@@ -95,9 +137,25 @@
 	<!-- Header row -->
 	<div class="panel-header">
 		<span class="title">Load Plan</span>
-		{#if displayPlan}
+
+		{#if showDropdown}
+			<!-- Plan directory dropdown (WAITING + dir configured) -->
+			<select
+				class="plan-select"
+				value={currentFilename}
+				onchange={(e) => selectPlan((e.target as HTMLSelectElement).value)}
+			>
+				{#each availablePlans as entry}
+					<option value={entry.filename}>{entry.plan_id}</option>
+				{/each}
+			</select>
+			{#if selectError}
+				<span class="select-error">⚠ {selectError}</span>
+			{/if}
+		{:else if displayPlan}
 			<span class="plan-id">{displayPlan.plan_id}</span>
 		{/if}
+
 		<div class="hdr-actions">
 			{#if !plan.isEditing}
 				<button class="btn" onclick={() => plan.reload()} title="Reload plan from server">
@@ -263,6 +321,32 @@
 		font-size: 0.74rem;
 		font-weight: 600;
 		color: var(--blue-br);
+	}
+
+	.plan-select {
+		flex: 1;
+		min-width: 0;
+		background: var(--bg2);
+		border: 1px solid var(--bg4);
+		border-radius: 4px;
+		color: var(--blue-br);
+		font-size: 0.74rem;
+		font-weight: 600;
+		padding: 2px 6px;
+		cursor: pointer;
+		appearance: none;
+		-webkit-appearance: none;
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23928374'/%3E%3C/svg%3E");
+		background-repeat: no-repeat;
+		background-position: right 7px center;
+		padding-right: 22px;
+	}
+	.plan-select:hover { border-color: var(--blue); }
+	.plan-select:focus { outline: none; border-color: var(--blue-br); }
+
+	.select-error {
+		color: var(--red-br);
+		font-size: 0.66rem;
 	}
 
 	.hdr-actions { display: flex; gap: 5px; }

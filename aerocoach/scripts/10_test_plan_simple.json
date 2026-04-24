@@ -1,5 +1,5 @@
 {
-	"plan_id": "Simple Test",
+	"plan_id": "Short Simple 1MB/s w/ Size Distribution",
 	"slice_duration_ms": 10000,
 	"total_bandwidth_bps": 1048576,
 	"file_distribution": {

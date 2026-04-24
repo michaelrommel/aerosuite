@@ -1,7 +1,7 @@
 {
-	"plan_id": "Unlimited",
+	"plan_id": "Short Sequential 20MB/s",
 	"slice_duration_ms": 30000,
-	"total_bandwidth_bps": 0,
+	"total_bandwidth_bps": 20971520,
 	"file_distribution": {
 		"buckets": [
 			{

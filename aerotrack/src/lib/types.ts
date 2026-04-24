@@ -70,3 +70,9 @@ export interface LoadPlan {
 	file_distribution: FileDistribution;
 	slices: SliceSpec[];
 }
+
+/** One entry returned by `GET /plans`. */
+export interface PlanEntry {
+	filename: string;
+	plan_id:  string;
+}

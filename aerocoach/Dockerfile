@@ -33,7 +33,8 @@ FROM alpine
 WORKDIR /aerocoach
 COPY --from=builder --chown=aerocoach:aerocoach /workspace/target/release/aerocoach .
 COPY aerocoach/scripts/run.sh .
-COPY aerocoach/scripts/test_plan.json .
+RUN mkdir -p /aerocoach/plans
+COPY aerocoach/scripts/test*.json /aerocoach/plans
 RUN apk add --no-cache curl tcpdump procps jq
 RUN adduser -D aerocoach
 RUN chown aerocoach:aerocoach .

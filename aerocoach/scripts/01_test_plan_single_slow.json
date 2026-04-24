@@ -1,5 +1,5 @@
 {
-	"plan_id": "Single Slow",
+	"plan_id": "Short Single File",
 	"slice_duration_ms": 65000,
 	"total_bandwidth_bps": 1048576,
 	"file_distribution": {
