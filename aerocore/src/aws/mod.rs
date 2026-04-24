@@ -3,7 +3,10 @@
 //!
 //! This is the content that previously lived in `aeroscaler/src/lib.rs`.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -13,9 +16,30 @@ type HmacSha256 = Hmac<Sha256>;
 // ── Credentials ───────────────────────────────────────────────────────────────
 
 pub struct AwsCredentials {
-    pub access_key_id: String,
+    pub access_key_id:     String,
     pub secret_access_key: String,
-    pub session_token: Option<String>,
+    pub session_token:     Option<String>,
+    /// UTC time at which these credentials expire.
+    /// `None` for long-lived static credentials (no session token).
+    pub expiration: Option<DateTime<Utc>>,
+}
+
+impl AwsCredentials {
+    /// Returns `true` when the credentials expire within `threshold` from now.
+    ///
+    /// Always returns `false` for static credentials with no expiration,
+    /// so callers can safely call this unconditionally.
+    pub fn is_expiring_soon(&self, threshold: Duration) -> bool {
+        match self.expiration {
+            Some(exp) => {
+                let remaining = exp.signed_duration_since(Utc::now());
+                remaining
+                    < chrono::Duration::from_std(threshold)
+                        .unwrap_or(chrono::Duration::zero())
+            }
+            None => false,
+        }
+    }
 }
 
 // ── IMDSv2 ────────────────────────────────────────────────────────────────────
@@ -91,10 +115,15 @@ pub async fn fetch_imds_credentials() -> Result<AwsCredentials> {
 
     println!("   Credentials valid until: {}", c.expiration);
 
+    let expiration = chrono::DateTime::parse_from_rfc3339(&c.expiration)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok();
+
     Ok(AwsCredentials {
-        access_key_id: c.access_key_id,
+        access_key_id:     c.access_key_id,
         secret_access_key: c.secret_access_key,
-        session_token: c.token,
+        session_token:     c.token,
+        expiration,
     })
 }
 

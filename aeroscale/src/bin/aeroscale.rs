@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, warn};
 
 use aeroscale::{
@@ -259,11 +259,11 @@ async fn main() -> Result<()> {
     );
 
     info!("fetching AWS credentials from IMDSv2 …");
-    let creds = Arc::new(
+    let creds: Arc<RwLock<aerocore::AwsCredentials>> = Arc::new(RwLock::new(
         fetch_imds_credentials()
             .await
             .context("Failed to obtain AWS credentials from IMDS")?,
-    );
+    ));
 
     info!("connecting to Redis …");
     let redis_client = build_redis_client(&args.redis_url, args.tls, args.tls_insecure, &None)
@@ -334,7 +334,26 @@ async fn main() -> Result<()> {
 
     let interval = Duration::from_secs(args.snapshot_interval);
 
+    // How early to refresh before the token actually expires.
+    const CREDS_REFRESH_AHEAD: Duration = Duration::from_secs(5 * 60); // 5 min
+
     loop {
+        // Proactively refresh credentials when they are about to expire.
+        // IAM role tokens from IMDS typically last 6 h; refreshing 5 min early
+        // ensures no AWS call ever sees an ExpiredToken error.
+        {
+            let needs_refresh = creds.read().await.is_expiring_soon(CREDS_REFRESH_AHEAD);
+            if needs_refresh {
+                match fetch_imds_credentials().await {
+                    Ok(new_creds) => {
+                        *creds.write().await = new_creds;
+                        info!("AWS credentials refreshed (approaching expiry)");
+                    }
+                    Err(e) => warn!("Failed to refresh AWS credentials: {e:#}"),
+                }
+            }
+        }
+
         // Determine role each cycle — handles failover transparently.
         let is_master = match vip_inside {
             Some(vip) => vrrp::is_master(vip).await,
@@ -351,12 +370,16 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Acquire a read lock on credentials for the entire cycle.
+        // The write lock (for refresh) was already released above.
+        let creds_r = creds.read().await;
+
         // Collect snapshot (always — both master and backup observe state)
         match SystemSnapshot::collect(
             &args.weights_dir,
             &args.region,
             &args.asg_name,
-            &creds,
+            &*creds_r,
             &mut redis_con,
             &slot_network,
             &mut owner_cache,
@@ -371,7 +394,7 @@ async fn main() -> Result<()> {
                     &snapshot,
                     &args.weights_dir,
                     &args.region,
-                    &creds,
+                    &*creds_r,
                     &mut redis_con,
                     args.dry_run,
                     is_master,
@@ -399,7 +422,7 @@ async fn main() -> Result<()> {
                     &metrics_store,
                     args.scrape_port,
                     &args.region,
-                    &creds,
+                    &*creds_r,
                     &args.cloudwatch_namespace,
                     is_master,
                     args.scrape_mismatch_pct,
@@ -414,7 +437,7 @@ async fn main() -> Result<()> {
                         &mut scaler_state,
                         &args.asg_name,
                         &args.region,
-                        &creds,
+                        &*creds_r,
                         &args.weights_dir,
                         args.dry_run,
                     )
