@@ -39,6 +39,7 @@ use tokio::sync::Notify;
 use tokio_stream::StreamExt as _;
 use tracing::{debug, error, info, warn};
 
+use tokio::sync::RwLock;
 use aerocore::AwsCredentials;
 
 use crate::cleanup::{terminate_instance, write_weight, WEIGHT_ACTIVE, WEIGHT_DISABLED};
@@ -66,7 +67,7 @@ pub async fn run(
     slot_network:             Arc<SlotNetwork>,
     weights_dir:              String,
     region:                   String,
-    creds:                    Arc<AwsCredentials>,
+    creds:                    Arc<RwLock<AwsCredentials>>,
     notify:                   Arc<Notify>,
     dry_run:                  bool,
     term_decrements_capacity: bool,
@@ -98,7 +99,7 @@ async fn subscribe_once(
     slot_network:             &SlotNetwork,
     weights_dir:              &str,
     region:                   &str,
-    creds:                    &AwsCredentials,
+    creds:                    &RwLock<AwsCredentials>,
     notify:                   &Notify,
     dry_run:                  bool,
     term_decrements_capacity: bool,
@@ -143,7 +144,7 @@ async fn handle_message(
     slot_network:             &SlotNetwork,
     weights_dir:              &str,
     region:                   &str,
-    creds:                    &AwsCredentials,
+    creds:                    &RwLock<AwsCredentials>,
     notify:                   &Notify,
     dry_run:                  bool,
     term_decrements_capacity: bool,
@@ -176,7 +177,8 @@ async fn handle_message(
 
             match msg.instance_id.as_deref() {
                 Some(instance_id) => {
-                    if let Err(e) = terminate_instance(instance_id, region, creds, dry_run, term_decrements_capacity).await {
+                    let creds_r = creds.read().await;
+                    if let Err(e) = terminate_instance(instance_id, region, &*creds_r, dry_run, term_decrements_capacity).await {
                         error!(
                             slot = msg.slot,
                             instance_id,
