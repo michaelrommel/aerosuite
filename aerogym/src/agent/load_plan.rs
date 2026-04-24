@@ -75,6 +75,19 @@ impl AgentPlan {
         RateLimiterConfig::from_bps(bps)
     }
 
+    /// Per-transfer rate when `n` transfers are running concurrently.
+    ///
+    /// This is the *ideal* rate used as a floor when carry-over transfers
+    /// have already consumed most of the agent's bandwidth budget.
+    /// Returns `None` when bandwidth is unlimited or `n` is zero.
+    pub fn rate_per_transfer(&self, n: u32) -> Option<RateLimiterConfig> {
+        let agent_bps = self.my_bandwidth_bps();
+        if agent_bps == 0 || n == 0 {
+            return None;
+        }
+        RateLimiterConfig::from_bps(agent_bps / n as u64)
+    }
+
     // ── File distribution ─────────────────────────────────────────────────
 
     /// Pick a bucket at random, weighted by each bucket's `percentage`.

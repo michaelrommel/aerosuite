@@ -111,6 +111,12 @@ message MetricsUpdate {
 
     // Transfers completed since the previous MetricsUpdate.
     repeated TransferRecord completed_transfers = 4;
+
+    // Cumulative bytes written to the FTP data connection by all currently
+    // active (in-flight) transfers.  Reported on every heartbeat tick so
+    // the coach can diff consecutive values to derive instantaneous
+    // bandwidth without the agent needing to know the sampling interval.
+    uint64 bytes_in_flight = 5;
 }
 
 message TransferRecord {

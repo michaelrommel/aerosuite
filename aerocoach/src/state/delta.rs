@@ -36,12 +36,15 @@ pub struct AgentSnapshot {
     pub connected:          bool,
     pub current_slice:      u32,
     pub active_connections: u32,
-    /// Cumulative bytes transferred by this agent.
+    /// Cumulative bytes transferred by completed transfers for this agent.
     pub bytes_transferred:  u64,
     pub success_count:      u32,
     pub error_count:        u32,
     pub private_ip:         String,
     pub instance_id:        String,
+    /// Current in-flight bytes across all active transfers.
+    /// Reported by the agent on every heartbeat; reset to 0 when idle.
+    pub bytes_in_flight:    u64,
 }
 
 /// One completed transfer record augmented with its source agent.
@@ -82,11 +85,17 @@ pub struct GlobalStats {
 /// Tracks the timestamp of the previous call to derive instantaneous bandwidth.
 pub struct DeltaEngine {
     last_compute_ms: i64,
+    /// Previous `bytes_in_flight` per agent, used to compute the delta
+    /// contribution of in-progress transfers between ticks.
+    prev_inflight:   std::collections::HashMap<String, u64>,
 }
 
 impl DeltaEngine {
     pub fn new() -> Self {
-        Self { last_compute_ms: Utc::now().timestamp_millis() }
+        Self {
+            last_compute_ms: Utc::now().timestamp_millis(),
+            prev_inflight:   std::collections::HashMap::new(),
+        }
     }
 
     /// Build a [`DashboardUpdate`] from a pre-collected snapshot of state.
@@ -125,6 +134,7 @@ impl DeltaEngine {
                     error_count:        t.error_count,
                     private_ip:         s.private_ip.clone(),
                     instance_id:        s.instance_id.clone(),
+                    bytes_in_flight:    t.bytes_in_flight,
                 }
             })
             .collect();
@@ -143,13 +153,31 @@ impl DeltaEngine {
             0.0
         };
 
-        // Instantaneous bandwidth from successful delta bytes.
-        let delta_bytes: u64 = drained
+        // ── Instantaneous bandwidth ────────────────────────────────────
+        // Combine bytes from transfers that *completed* this tick with the
+        // *progress* made by still-running transfers (diff of bytes_in_flight
+        // vs. the previous snapshot).  This gives a meaningful reading even
+        // when no transfer finishes within the 3 s window.
+        let delta_completed: u64 = drained
             .iter()
             .filter(|(_, r)| r.success)
             .map(|(_, r)| r.bytes_transferred)
             .sum();
-        let current_bandwidth_bps = (delta_bytes as f64 / elapsed_secs) as u64;
+        let delta_inflight: u64 = agents
+            .iter()
+            .map(|a| {
+                let prev = self.prev_inflight.get(&a.agent_id).copied().unwrap_or(0);
+                a.bytes_in_flight.saturating_sub(prev)
+            })
+            .sum();
+        // Update stored snapshot for next tick.
+        self.prev_inflight = agents
+            .iter()
+            .map(|a| (a.agent_id.clone(), a.bytes_in_flight))
+            .collect();
+
+        let current_bandwidth_bps =
+            ((delta_completed + delta_inflight) as f64 / elapsed_secs) as u64;
 
         // ── Delta transfer records ─────────────────────────────────────
         let completed_transfers: Vec<TransferDelta> = drained
@@ -236,7 +264,7 @@ mod tests {
     fn compute_returns_correct_slice_info() {
         let mut engine = DeltaEngine::new();
         let snapshot = [make_status("a00", 0, true, 5)];
-        let totals = AgentTotals { success_count: 2, error_count: 0, bytes_transferred: 2048 };
+        let totals = AgentTotals { success_count: 2, error_count: 0, bytes_transferred: 2048, bytes_in_flight: 0 };
         let update = engine.compute(2, 6, &snapshot, |_| totals.clone(), &[]);
         assert_eq!(update.current_slice, 2);
         assert_eq!(update.total_slices, 6);
@@ -249,8 +277,8 @@ mod tests {
             make_status("a00", 0, true, 5),
             make_status("a01", 1, true, 3),
         ];
-        let totals_a00 = AgentTotals { success_count: 10, error_count: 2, bytes_transferred: 8192 };
-        let totals_a01 = AgentTotals { success_count: 5,  error_count: 1, bytes_transferred: 4096 };
+        let totals_a00 = AgentTotals { success_count: 10, error_count: 2, bytes_transferred: 8192, bytes_in_flight: 0 };
+        let totals_a01 = AgentTotals { success_count: 5,  error_count: 1, bytes_transferred: 4096, bytes_in_flight: 0 };
         let update = engine.compute(1, 3, &snapshot, |id| {
             if id == "a00" { totals_a00.clone() } else { totals_a01.clone() }
         }, &[]);
@@ -265,7 +293,7 @@ mod tests {
     fn error_rate_computed_correctly() {
         let mut engine = DeltaEngine::new();
         let snapshot = [make_status("a00", 0, true, 0)];
-        let totals = AgentTotals { success_count: 9, error_count: 1, bytes_transferred: 0 };
+        let totals = AgentTotals { success_count: 9, error_count: 1, bytes_transferred: 0, bytes_in_flight: 0 };
         let update = engine.compute(0, 1, &snapshot, |_| totals.clone(), &[]);
         assert!((update.global_stats.overall_error_rate - 0.1).abs() < 1e-9);
     }

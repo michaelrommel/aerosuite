@@ -50,7 +50,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use aeroproto::aeromonitor::agent_service_server::AgentServiceServer;
-use aeroproto::aeromonitor::{coach_command, CoachCommand, LoadPlanUpdate, TimeSlice};
+use aeroproto::aeromonitor::{coach_command, CoachCommand, LoadPlanUpdate, TimeSlice, TransferRecord};
 
 use crate::config::Config;
 use crate::grpc::agent_service::AgentServiceImpl;
@@ -152,15 +152,60 @@ async fn main() -> Result<()> {
                                 warn!(error = %e, "NDJSON append failed");
                             }
                         }
-                        // Once the test is done, flush and close the writer.
+                        // Once the test is done, synthesize error records for any
+                        // in-flight (incomplete) transfers, flush, and close the writer.
                         if is_done {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            let mut incomplete_total: u32 = 0;
+                            for agent in &snapshot {
+                                if agent.active_connections == 0 {
+                                    continue;
+                                }
+                                incomplete_total += agent.active_connections;
+                                for conn_idx in 0..agent.active_connections {
+                                    let record = TransferRecord {
+                                        filename: format!(
+                                            "{}_slice{}_incomplete_{}",
+                                            agent.agent_id,
+                                            agent.current_slice,
+                                            conn_idx
+                                        ),
+                                        bucket_id:         String::new(),
+                                        bytes_transferred: 0,
+                                        file_size_bytes:   0,
+                                        bandwidth_kibps:   0,
+                                        success:           false,
+                                        error_reason:      Some(
+                                            "transfer incomplete: test ended before completion"
+                                                .to_string(),
+                                        ),
+                                        start_time_ms: 0,
+                                        end_time_ms:   now_ms,
+                                        time_slice:    agent.current_slice,
+                                    };
+                                    if let Err(e) = writer.append(&agent.agent_id, &record) {
+                                        warn!(
+                                            error    = %e,
+                                            agent_id = %agent.agent_id,
+                                            "NDJSON append failed for incomplete transfer"
+                                        );
+                                    }
+                                }
+                            }
+                            if incomplete_total > 0 {
+                                warn!(
+                                    count = incomplete_total,
+                                    "wrote synthetic error records for incomplete in-flight transfers"
+                                );
+                            }
                             if let Err(e) = writer.flush() {
                                 warn!(error = %e, "NDJSON flush failed");
                             }
                         }
                     }
-                    if is_done {
-                        write.record_writer = None;
+                    // Only log + drop the writer once — if it was already None
+                    // (every subsequent tick after Done) this is a no-op.
+                    if is_done && write.record_writer.take().is_some() {
                         info!("NDJSON record file closed");
                     }
 

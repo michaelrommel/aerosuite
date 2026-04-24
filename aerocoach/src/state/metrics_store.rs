@@ -21,9 +21,13 @@ pub struct MetricsStore {
 /// Running totals for one agent.
 #[derive(Debug, Default, Clone)]
 pub struct AgentTotals {
-    pub success_count: u32,
-    pub error_count: u32,
-    pub bytes_transferred: u64,
+    pub success_count:      u32,
+    pub error_count:        u32,
+    pub bytes_transferred:  u64,
+    /// Latest `bytes_in_flight` value received from the agent's heartbeat.
+    /// This is the current (instantaneous) count, not cumulative — it resets
+    /// to zero when all transfers for the agent complete.
+    pub bytes_in_flight:    u64,
 }
 
 impl MetricsStore {
@@ -53,6 +57,9 @@ impl MetricsStore {
             );
             self.completed.push((agent_id.clone(), record.clone()));
         }
+        // Overwrite with the latest instantaneous value from the agent’s
+        // heartbeat (not cumulative — the agent resets it to 0 when idle).
+        totals.bytes_in_flight = update.bytes_in_flight;
     }
 
     /// Drain all completed transfers since the last call.
@@ -106,6 +113,7 @@ mod tests {
                 make_record("a00_s001_c001.dat", true, 1024),
                 make_record("a00_s001_c002.dat", false, 0),
             ],
+            bytes_in_flight: 0,
         };
         store.record_update("a00".into(), &update);
 
@@ -124,6 +132,7 @@ mod tests {
             active_connections: 1,
             queued_connections: 0,
             completed_transfers: vec![make_record("f.dat", true, 512)],
+            bytes_in_flight: 0,
         };
         store.record_update("a01".into(), &update);
 

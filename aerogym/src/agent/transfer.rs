@@ -15,6 +15,7 @@
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,11 +38,40 @@ type TcpStreamFuture = Pin<
     Box<dyn futures::Future<Output = std::result::Result<TcpStream, suppaftp::FtpError>> + Send + Sync>,
 >;
 
+// ── CountingReader ────────────────────────────────────────────────────────
+
+/// Wraps any [`tokio::io::AsyncRead`] and atomically increments a shared
+/// counter as bytes flow through.  Used to track in-flight byte progress
+/// for both the rate-limited and unlimited upload paths.
+struct CountingReader<R> {
+    inner:      R,
+    bytes_sent: Arc<AtomicU64>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for CountingReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx:       &mut std::task::Context<'_>,
+        buf:      &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let res    = Pin::new(&mut self.inner).poll_read(cx, buf);
+        let n      = buf.filled().len() - before;
+        if n > 0 {
+            self.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        res
+    }
+}
+
 // ── Public types ──────────────────────────────────────────────────────────
 
 /// Result of a single FTP transfer task.
 #[derive(Debug, Clone)]
 pub struct TransferOutcome {
+    /// Connection ID assigned by the session loop; used to retire the
+    /// bandwidth allocation from the running-rates map on completion.
+    pub conn_id: u64,
     pub filename: String,
     pub bucket_id: String,
     pub bytes_transferred: u64,
@@ -81,7 +111,11 @@ impl TransferOutcome {
 /// Errors from the FTP layer are caught here and reported as
 /// `TransferOutcome { success: false, error_reason: Some(...) }` so callers
 /// never need to handle `Result`.
+///
+/// `bytes_sent` is incremented atomically as data flows through the upload
+/// path, allowing the session loop to sample in-flight progress at any time.
 pub async fn run_transfer(
+    conn_id: u64,
     filename: String,
     bucket_id: String,
     local_file: PathBuf,
@@ -90,6 +124,7 @@ pub async fn run_transfer(
     ftp_pass: String,
     rate_config: Option<RateLimiterConfig>,
     time_slice: u32,
+    bytes_sent: Arc<AtomicU64>,
 ) -> TransferOutcome {
     let start_ms = now_ms();
 
@@ -106,6 +141,7 @@ pub async fn run_transfer(
         &ftp_user,
         &ftp_pass,
         rate_config,
+        bytes_sent,
     )
     .await
     {
@@ -127,6 +163,7 @@ pub async fn run_transfer(
                 "transfer complete"
             );
             TransferOutcome {
+                conn_id,
                 filename,
                 bucket_id,
                 bytes_transferred,
@@ -143,6 +180,7 @@ pub async fn run_transfer(
             let end_ms = now_ms();
             warn!(filename = %filename, bucket = %bucket_id, error = %e, "transfer failed");
             TransferOutcome {
+                conn_id,
                 filename,
                 bucket_id,
                 bytes_transferred: 0,
@@ -162,12 +200,13 @@ pub async fn run_transfer(
 
 /// Perform the actual FTP upload.  Returns the number of bytes transferred.
 async fn ftp_upload(
-    filename: &str,
-    local_file: &Path,
-    ftp_target: &str,
-    ftp_user: &str,
-    ftp_pass: &str,
+    filename:    &str,
+    local_file:  &Path,
+    ftp_target:  &str,
+    ftp_user:    &str,
+    ftp_pass:    &str,
     rate_config: Option<RateLimiterConfig>,
+    bytes_sent:  Arc<AtomicU64>,
 ) -> Result<u64> {
     // ── Connect & authenticate ────────────────────────────────────────────
     let mut ftp = AsyncFtpStream::connect(ftp_target)
@@ -188,8 +227,9 @@ async fn ftp_upload(
     let bytes_written = match rate_config {
         // ── Unlimited ─────────────────────────────────────────────────────
         None => {
-            let mut f = file;
-            ftp.put_file(filename, &mut f)
+            // CountingReader keeps bytes_sent updated as the file streams.
+            let mut counting = CountingReader { inner: file, bytes_sent };
+            ftp.put_file(filename, &mut counting)
                 .await
                 .with_context(|| format!("FTP put_file {filename:?} failed"))?
         }
@@ -209,11 +249,12 @@ async fn ftp_upload(
                 .await
                 .with_context(|| format!("FTP put_with_stream {filename:?} failed"))?;
 
-            let mut reader_stream =
-                ReaderStream::with_capacity(file, cfg.chunk_bytes as usize);
-
             let n = if cfg.interval_ms > 0 {
                 // Throttled: one chunk per `interval_ms` milliseconds.
+                // Count bytes before yielding so the session loop always
+                // sees a value ≤ actual bytes on the wire.
+                let mut reader_stream =
+                    ReaderStream::with_capacity(file, cfg.chunk_bytes as usize);
                 let quota = Quota::with_period(Duration::from_millis(cfg.interval_ms))
                     .with_context(|| {
                         format!("invalid rate-limit interval {} ms", cfg.interval_ms)
@@ -225,9 +266,13 @@ async fn ftp_upload(
                     interval_ms  = cfg.interval_ms,
                     "starting rate-limited transfer"
                 );
+                let bs = bytes_sent.clone();
                 let throttled = stream! {
                     while let Some(chunk) = reader_stream.next().await {
                         limiter.until_ready().await;
+                        if let Ok(ref c) = chunk {
+                            bs.fetch_add(c.len() as u64, Ordering::Relaxed);
+                        }
                         yield chunk;
                     }
                 };
@@ -237,8 +282,9 @@ async fn ftp_upload(
                     .await
                     .with_context(|| format!("rate-limited copy for {filename:?} failed"))?
             } else {
-                // Custom socket (MSS) but no governor throttle.
-                let async_reader = StreamReader::new(reader_stream);
+                // Custom socket (MSS) but no governor throttle — use CountingReader.
+                let counting     = CountingReader { inner: file, bytes_sent };
+                let async_reader = StreamReader::new(ReaderStream::new(counting));
                 tokio::pin!(async_reader);
                 tokio::io::copy(&mut async_reader, &mut data_stream)
                     .await
@@ -296,6 +342,7 @@ mod tests {
 
     fn dummy_outcome(success: bool) -> TransferOutcome {
         TransferOutcome {
+            conn_id: 1,
             filename: "a00_s001_c000001.dat".into(),
             bucket_id: "xs".into(),
             bytes_transferred: if success { 4096 } else { 0 },
@@ -334,6 +381,7 @@ mod tests {
     #[tokio::test]
     async fn missing_file_gives_error_outcome() {
         let outcome = run_transfer(
+            0,
             "test.dat".into(),
             "xs".into(),
             PathBuf::from("/nonexistent/path/file.dat"),
@@ -342,6 +390,7 @@ mod tests {
             "pass".into(),
             None,
             0,
+            Arc::new(AtomicU64::new(0)),
         )
         .await;
 

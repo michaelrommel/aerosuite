@@ -15,16 +15,20 @@
 //! On SliceTick:
 //!   1. Send SliceAck immediately
 //!   2. Flush accumulated metrics (previous slice completions)
-//!   3. Ramp up: spawn (target − running) new transfer tasks
-//!   (Ramp down: do nothing — running tasks complete naturally)
+//!   3. Ramp up: spawn (target - running) new transfer tasks
+//!   (Ramp down: do nothing - running tasks complete naturally)
 //! ```
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::time::MissedTickBehavior;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::transport::Channel;
 use tracing::{info, warn};
@@ -38,12 +42,34 @@ use super::{
     config::Config,
     load_plan::{make_transfer_filename, AgentPlan},
     metrics::MetricsAccumulator,
+    rate_limit::RateLimiterConfig,
     transfer::{run_transfer, TransferOutcome},
 };
 
 /// Report channel buffer: large enough to avoid back-pressure during
 /// burst acking after many slice transitions.
 const REPORT_CHANNEL_CAP: usize = 128;
+
+/// How often the session loop sends a heartbeat [`MetricsUpdate`] to the
+/// coach while transfers are in-flight.  Matches the coach's dashboard
+/// broadcast interval so each tick produces a fresh data point.
+const METRICS_HEARTBEAT: Duration = Duration::from_secs(3);
+
+// ── InFlightInfo ─────────────────────────────────────────────────────────────
+
+/// Metadata retained for each transfer task while it is still running.
+/// Used to (a) compute the `bytes_in_flight` total for heartbeat reports
+/// and (b) synthesise an error [`TransferOutcome`] for any task that is
+/// aborted by the graceful-drain timeout at shutdown.
+struct InFlightInfo {
+    filename:        String,
+    bucket_id:       String,
+    time_slice:      u32,
+    start_ms:        i64,
+    file_size_bytes: u64,
+    /// Atomically updated by the transfer task as chunks leave the buffer.
+    bytes_sent:      Arc<AtomicU64>,
+}
 
 /// Open the `Session` stream and run the slice loop until the test ends.
 pub async fn run(
@@ -77,6 +103,7 @@ pub async fn run(
                 active_connections: 0,
                 queued_connections: 0,
                 completed_transfers: vec![],
+                bytes_in_flight: 0,
             },
         ))
         .await
@@ -90,12 +117,28 @@ pub async fn run(
         .context("Session RPC failed to open")?;
     let mut inbound = response.into_inner();
 
-    info!(agent_id = %config.agent_id, "session open — waiting for first SliceTick");
+    info!(agent_id = %config.agent_id, "session open - waiting for first SliceTick");
 
     // ── Slice execution loop ──────────────────────────────────────────────
     let mut active_tasks: JoinSet<TransferOutcome> = JoinSet::new();
-    let mut metrics = MetricsAccumulator::new();
+    let mut metrics     = MetricsAccumulator::new();
     let mut conn_id: u64 = 0;
+    // conn_id → per-transfer in-flight state (byte counter + metadata).
+    let mut in_flight: HashMap<u64, InFlightInfo> = HashMap::new();
+    // conn_id → bytes/sec allocated to each still-running transfer.
+    // Used to calculate available bandwidth when ramping up.
+    let mut running_rates: HashMap<u64, u64> = HashMap::new();
+    // Current slice index, updated on every SliceTick for use in heartbeats.
+    let mut current_slice: u32 = 0;
+
+    // Periodic heartbeat: sends a MetricsUpdate even when no transfer
+    // completes, so aerocoach always has fresh active_connections and
+    // bytes_in_flight data.
+    let mut metrics_tick = tokio::time::interval(METRICS_HEARTBEAT);
+    metrics_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Consume the first (immediate) tick so we don't flood the coach with
+    // an empty update before the first SliceTick arrives.
+    metrics_tick.tick().await;
 
     loop {
         tokio::select! {
@@ -105,7 +148,7 @@ pub async fn run(
             cmd_opt = inbound.next() => {
                 match cmd_opt {
                     None => {
-                        info!("aerocoach closed the session stream — exiting");
+                        info!("aerocoach closed the session stream - exiting");
                         break;
                     }
                     Some(Err(e)) => {
@@ -115,6 +158,7 @@ pub async fn run(
                         match cmd.payload {
 
                             Some(coach_command::Payload::SliceTick(tick)) => {
+                                current_slice = tick.slice_index;
                                 handle_slice_tick(
                                     tick.slice_index,
                                     config,
@@ -124,6 +168,8 @@ pub async fn run(
                                     &mut metrics,
                                     &mut conn_id,
                                     &report_tx,
+                                    &mut running_rates,
+                                    &mut in_flight,
                                 )
                                 .await?;
                             }
@@ -150,6 +196,7 @@ pub async fn run(
                                     &config.agent_id,
                                     &mut active_tasks,
                                     &mut metrics,
+                                    in_flight,
                                     report_tx,
                                 )
                                 .await;
@@ -166,8 +213,35 @@ pub async fn run(
             // ── Completed transfer task ────────────────────────────────
             Some(result) = active_tasks.join_next(), if !active_tasks.is_empty() => {
                 match result {
-                    Ok(outcome) => metrics.record(outcome),
+                    Ok(outcome) => {
+                        // Release bandwidth allocation and in-flight tracking.
+                        running_rates.remove(&outcome.conn_id);
+                        in_flight.remove(&outcome.conn_id);
+                        metrics.record(outcome);
+                    }
                     Err(e) => warn!(error = %e, "transfer task panicked"),
+                }
+            }
+
+            // ── Periodic heartbeat ─────────────────────────────────────
+            _ = metrics_tick.tick() => {
+                let bytes_in_flight: u64 = in_flight
+                    .values()
+                    .map(|i| i.bytes_sent.load(Ordering::Relaxed))
+                    .sum();
+                let active = active_tasks.len() as u32;
+                if let Some(update) = metrics.drain_into_update(
+                    current_slice,
+                    active,
+                    bytes_in_flight,
+                    active > 0, // force a send while transfers are running
+                ) {
+                    if let Err(e) = report_tx
+                        .send(make_metrics_report(&config.agent_id, update))
+                        .await
+                    {
+                        warn!(error = %e, "failed to send heartbeat MetricsUpdate");
+                    }
                 }
             }
         }
@@ -187,6 +261,8 @@ async fn handle_slice_tick(
     metrics: &mut MetricsAccumulator,
     conn_id: &mut u64,
     report_tx: &mpsc::Sender<AgentReport>,
+    running_rates: &mut HashMap<u64, u64>,
+    in_flight: &mut HashMap<u64, InFlightInfo>,
 ) -> Result<()> {
     let my_target = plan.my_connections_for_slice(slice_index);
     let running = active_tasks.len() as u32;
@@ -198,14 +274,18 @@ async fn handle_slice_tick(
         "slice tick"
     );
 
-    // ── 1. Ack immediately so the clock isn't stalled ─────────────────────
+    // ── 1. Ack immediately so the clock isn’t stalled ─────────────────────
     report_tx
         .send(make_ack_report(&config.agent_id, slice_index))
         .await
         .context("failed to send SliceAck")?;
 
     // ── 2. Flush metrics accumulated since the last tick ──────────────────
-    if let Some(update) = metrics.drain_into_update(slice_index, running, false) {
+    let bytes_in_flight: u64 = in_flight
+        .values()
+        .map(|i| i.bytes_sent.load(Ordering::Relaxed))
+        .sum();
+    if let Some(update) = metrics.drain_into_update(slice_index, running, bytes_in_flight, false) {
         report_tx
             .send(make_metrics_report(&config.agent_id, update))
             .await
@@ -214,8 +294,31 @@ async fn handle_slice_tick(
 
     // ── 3. Ramp up new transfers if target > currently running ────────────
     if my_target > running {
-        let to_start = my_target - running;
-        let rate_cfg = plan.my_rate_config();
+        let to_start  = my_target - running;
+        let agent_bps = plan.my_bandwidth_bps();
+
+        // Bandwidth already committed to carry-over transfers from previous
+        // slices.  Each entry was recorded when the transfer was spawned.
+        let carry_over_bps: u64 = running_rates.values().sum();
+
+        // Remaining budget for the new batch.
+        let available_bps = agent_bps.saturating_sub(carry_over_bps);
+
+        // Per-transfer rate for the new connections.
+        //
+        // Ideal = agent_bps / target  (what every transfer would get if all
+        //         started together).
+        //
+        // When carry-overs have exhausted the budget (available == 0) we fall
+        // back to the ideal rate.  This causes a temporary over-allocation
+        // that resolves naturally as carry-overs complete.
+        let ideal_bps = if my_target > 0 { agent_bps / my_target as u64 } else { 0 };
+        let per_new_bps = if available_bps > 0 && to_start > 0 {
+            available_bps / to_start as u64
+        } else {
+            ideal_bps
+        };
+        let rate_cfg = RateLimiterConfig::from_bps(per_new_bps);
 
         for _ in 0..to_start {
             let Some(bucket) = plan.weighted_random_bucket() else {
@@ -229,14 +332,34 @@ async fn handle_slice_tick(
             };
 
             *conn_id += 1;
-            let filename = make_transfer_filename(&config.agent_id, slice_index, *conn_id);
+            let cid      = *conn_id;
+            let filename = make_transfer_filename(&config.agent_id, slice_index, cid);
 
             let ftp_target = config.ftp_target.clone();
             let ftp_user   = config.ftp_user.clone();
             let ftp_pass   = config.ftp_pass.clone();
             let bucket_id  = bucket.bucket_id.clone();
 
+            // Record the allocation and in-flight metadata before spawning
+            // so both maps are always consistent with what’s running.
+            running_rates.insert(cid, per_new_bps);
+
+            let bytes_sent = Arc::new(AtomicU64::new(0));
+            let file_size_bytes = tokio::fs::metadata(&local_file)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            in_flight.insert(cid, InFlightInfo {
+                filename:        filename.clone(),
+                bucket_id:       bucket_id.clone(),
+                time_slice:      slice_index,
+                start_ms:        now_ms(),
+                file_size_bytes,
+                bytes_sent:      bytes_sent.clone(),
+            });
+
             active_tasks.spawn(run_transfer(
+                cid,
                 filename,
                 bucket_id,
                 local_file,
@@ -245,13 +368,17 @@ async fn handle_slice_tick(
                 ftp_pass,
                 rate_cfg,
                 slice_index,
+                bytes_sent,
             ));
         }
 
         info!(
-            slice   = slice_index,
-            started = to_start,
-            total   = active_tasks.len(),
+            slice        = slice_index,
+            started      = to_start,
+            total        = active_tasks.len(),
+            per_new_bps,
+            carry_bps    = carry_over_bps,
+            available_bps,
             "ramped up transfers"
         );
     }
@@ -276,8 +403,9 @@ async fn shutdown(
     agent_id: &str,
     active_tasks: &mut JoinSet<TransferOutcome>,
     metrics: &mut MetricsAccumulator,
-    // Taken by value so we can drop it explicitly below, which closes the
-    // mpsc sender and signals end-of-stream to the gRPC transport.
+    // Taken by value so we can record aborted-transfer outcomes and then
+    // drop it explicitly to close the gRPC stream cleanly.
+    in_flight: HashMap<u64, InFlightInfo>,
     report_tx: mpsc::Sender<AgentReport>,
 ) -> Result<()> {
     if graceful {
@@ -291,24 +419,28 @@ async fn shutdown(
             tokio::select! {
                 biased;
 
-                // Drain timeout — abort whatever is left and move on.
+                // Drain timeout - abort whatever is left and move on.
                 _ = &mut deadline => {
                     let remaining = active_tasks.len();
                     if remaining > 0 {
                         warn!(
                             tasks = remaining,
                             timeout_secs = GRACEFUL_DRAIN_TIMEOUT.as_secs(),
-                            "graceful drain timed out — aborting remaining transfers"
+                            "graceful drain timed out - aborting remaining transfers"
                         );
                         active_tasks.shutdown().await;
                     }
                     break;
                 }
 
-                // Normal completion path.
+                // Normal completion path: record outcome, remove from in_flight.
                 result = active_tasks.join_next() => {
                     match result {
-                        Some(Ok(outcome))  => metrics.record(outcome),
+                        Some(Ok(outcome))  => {
+                            // in_flight is owned here so we can’t remove; aborted
+                            // entries are handled below after the loop.
+                            metrics.record(outcome);
+                        }
                         Some(Err(e))       => warn!(error = %e, "transfer task panicked"),
                         None               => break, // all tasks finished cleanly
                     }
@@ -319,8 +451,35 @@ async fn shutdown(
         active_tasks.shutdown().await;
     }
 
+    // Any entries remaining in in_flight were aborted (either by the graceful
+    // drain timeout or the non-graceful shutdown path).  Synthesize an error
+    // record for each one so the final report always accounts for them.
+    let abort_end_ms = now_ms();
+    for (conn_id, info) in in_flight {
+        let bytes = info.bytes_sent.load(Ordering::Relaxed);
+        warn!(
+            conn_id,
+            filename = %info.filename,
+            bytes_sent = bytes,
+            "transfer aborted — synthesising error record"
+        );
+        metrics.record(TransferOutcome {
+            conn_id,
+            filename:        info.filename,
+            bucket_id:       info.bucket_id,
+            bytes_transferred: bytes,
+            file_size_bytes: info.file_size_bytes,
+            bandwidth_kibps: 0,
+            success:         false,
+            error_reason:    Some("transfer aborted: test ended before completion".into()),
+            start_time_ms:   info.start_ms,
+            end_time_ms:     abort_end_ms,
+            time_slice:      info.time_slice,
+        });
+    }
+
     // Final metrics flush (force=true so we always send at least one update).
-    if let Some(update) = metrics.drain_into_update(0, 0, true) {
+    if let Some(update) = metrics.drain_into_update(0, 0, 0, true) {
         let _ = report_tx
             .send(make_metrics_report(agent_id, update))
             .await;
@@ -445,7 +604,7 @@ mod tests {
                             if let Some(agent_report::Payload::SliceAck(ack)) = &report.payload {
                                 if ack.slice_index == 0 { break; }
                             }
-                            // Any other payload (rare) — keep waiting.
+                            // Any other payload (rare) - keep waiting.
                         }
                         _ => { done.notify_one(); return; }
                     }
