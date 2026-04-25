@@ -277,6 +277,27 @@ build {
   }
 
   # Stage the credentials file via /tmp (writable by alpine), then move it into place
+  # also some support scripts suitable for debugging
+  provisioner "file" {
+    source      = "./_home_aeroftp_scripts_tc.sh"
+    destination = "/tmp/_home_aeroftp_scripts_tc.sh"
+  }
+  provisioner "file" {
+    source      = "./_home_aeroftp_scripts_stats.sh"
+    destination = "/tmp/_home_aeroftp_scripts_stats.sh"
+  }
+  provisioner "file" {
+    source      = "./_home_aeroftp_scripts_track_conn.sh"
+    destination = "/tmp/_home_aeroftp_scripts_track_conn.sh"
+  }
+  provisioner "file" {
+    source      = "./_home_aeroftp_scripts_track_cpu.sh"
+    destination = "/tmp/_home_aeroftp_scripts_track_cpu.sh"
+  }
+  provisioner "file" {
+    source      = "./_home_aeroftp_scripts_track_mem.sh"
+    destination = "/tmp/_home_aeroftp_scripts_track_mem.sh"
+  }
   provisioner "file" {
     source      = "./_home_aeroftp_credentials.json"
     destination = "/tmp/_home_aeroftp_credentials.json"
@@ -284,8 +305,14 @@ build {
 
   provisioner "shell" {
     inline = [
+      "sudo mkdir -p /home/aeroftp/scripts",
       "sudo mv /tmp/_home_aeroftp_credentials.json /home/aeroftp/credentials.json",
-      "sudo chown aeroftp:aeroftp /home/aeroftp/credentials.json",
+      "sudo mv /tmp/_home_aeroftp_scripts_tc.sh /home/aeroftp/scripts/tc.sh",
+      "sudo mv /tmp/_home_aeroftp_scripts_stats.sh /home/aeroftp/scripts/stats.sh",
+      "sudo mv /tmp/_home_aeroftp_scripts_track_conn.sh /home/aeroftp/scripts/track_conn.sh",
+      "sudo mv /tmp/_home_aeroftp_scripts_track_cpu.sh /home/aeroftp/scripts/track_cpu.sh",
+      "sudo mv /tmp/_home_aeroftp_scripts_track_mem.sh /home/aeroftp/scripts/track_mem.sh",
+      "sudo chown -R aeroftp:aeroftp /home/aeroftp",
     ]
   }
 
