@@ -62,18 +62,18 @@
 	<!-- Coach state badge -->
 	<div class="state-badge {stateClass}">{coachState}</div>
 
-	<!-- Connected agent count -->
-	<div class="agents-info">
-		<span class="count">{connectedAgents}</span>
-		<span class="count">agents</span>
-	</div>
-
 	<!-- WebSocket status circle: solid green = connected, red outline = not -->
 	<div
 		class="ws-indicator"
 		class:connected={dashboard.wsStatus === 'open'}
 		title="WebSocket: {dashboard.wsStatus}"
 	></div>
+
+	<!-- Connected agent count -->
+	<div class="agents-info">
+		<span class="count">{connectedAgents}</span>
+		<span class="count">agents</span>
+	</div>
 
 	<div class="spacer"></div>
 
@@ -82,16 +82,16 @@
 		<button class="btn start" onclick={start}>▶ Start</button>
 	{/if}
 	{#if isRunning}
-		<button class="btn stop" onclick={stop}>■ Stop</button>
+		<button class="btn stop" onclick={stop}>⏹ Stop</button>
 	{/if}
 	{#if isDone}
-		<a class="btn download" href="/results" download>⬇ Results</a>
-		<button class="btn reset" onclick={reset}>↺ Reset</button>
+		<a class="btn download" href="/results" download>📓 Results</a>
+		<button class="btn reset" onclick={reset}>⭮ Reset</button>
 	{/if}
 
 	<!-- Logout — always far-right -->
 	<form method="POST" action="/login?/logout" style="display:contents">
-		<button type="submit" class="btn logout" title="Sign out">⏻</button>
+		<button type="submit" class="btn logout" title="Sign out">➜]</button>
 	</form>
 </header>
 

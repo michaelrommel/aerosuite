@@ -9,11 +9,16 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Auto-scale bytes-per-second to a Mbit/s or Gbit/s string.
+ * Auto-scale bytes-per-second to a human-readable IEC binary bit-rate string.
+ * Uses powers of 1024 and IEC unit names (GiBit/s, MiBit/s, KiBit/s).
  */
 export function formatBandwidth(bps: number): string {
-	const mbps = (bps * 8) / 1_000_000;
-	if (mbps < 0.01)  return '< 0.01 Mbit/s';
-	if (mbps < 1_000) return `${mbps.toFixed(2)} Mbit/s`;
-	return                   `${(mbps / 1_000).toFixed(2)} Gbit/s`;
+	const bits    = bps * 8;
+	const GiBit   = 1024 ** 3;
+	const MiBit   = 1024 ** 2;
+	const KiBit   = 1024;
+	if (bits >= GiBit) return `${(bits / GiBit).toFixed(2)} GiBit/s`;
+	if (bits >= MiBit) return `${(bits / MiBit).toFixed(2)} MiBit/s`;
+	if (bits >= KiBit) return `${(bits / KiBit).toFixed(2)} KiBit/s`;
+	return                    `${bits.toFixed(0)} bit/s`;
 }

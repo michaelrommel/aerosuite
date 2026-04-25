@@ -98,9 +98,7 @@
 	const slices      = $derived(displayPlan?.slices ?? []);
 	const maxConns    = $derived(Math.max(...slices.map((s) => s.total_connections), 1));
 	const sliceDurMs  = $derived(displayPlan?.slice_duration_ms ?? 60_000);
-	const bwMbps      = $derived(
-		displayPlan ? (displayPlan.total_bandwidth_bps / 1_000_000).toFixed(0) : '0'
-	);
+	const bwRaw = $derived(displayPlan?.total_bandwidth_bps ?? 0);
 	// Formatted values for the footer stat tiles.
 	const durationLabel = $derived((() => {
 		if (!displayPlan) return '—';
@@ -180,7 +178,7 @@
 
 	function onBwInput(e: Event) {
 		const v = parseFloat((e.target as HTMLInputElement).value);
-		if (!isNaN(v) && v > 0) plan.updateBandwidth(v * 1_000_000);
+		if (!isNaN(v) && v > 0) plan.updateBandwidth(v);
 	}
 </script>
 
@@ -236,7 +234,7 @@
 					</button>
 				{/if}
 				<button class="btn accent" onclick={() => plan.enterEditMode()}>
-					✏ Edit Plan
+					✏️ Edit Plan
 				</button>
 			{/if}
 		</div>
@@ -246,8 +244,8 @@
 	{#if plan.isEditing}
 		<div class="edit-bar">
 			<label>
-				Bandwidth (Mbit/s):
-				<input type="number" min="0.001" step="any" value={bwMbps} oninput={onBwInput} />
+				Bandwidth (bytes/s):
+				<input type="number" min="1" step="1" value={bwRaw} oninput={onBwInput} />
 			</label>
 			<div class="spacer"></div>
 			{#if plan.editError}
@@ -382,7 +380,7 @@
 		display: flex;
 		flex-direction: column;
 		height: 100%;
-		padding: 8px 12px 6px;
+		padding: 12px;
 		box-sizing: border-box;
 		overflow: hidden;
 	}
@@ -547,7 +545,7 @@
 	/* ── Footer stat tiles ───────────────────────────── */
 	.plan-footer {
 		display: flex;
-		gap: 8px;
+		gap: 10px;
 		padding-top: 6px;
 		flex-shrink: 0;
 	}
@@ -556,8 +554,8 @@
 		flex: 1;
 		background: var(--bg2);
 		border: 1px solid var(--bg3);
-		border-radius: 5px;
-		padding: 5px 10px;
+		border-radius: 6px;
+		padding: 10px 14px;
 		display: flex;
 		flex-direction: column;
 		gap: 3px;

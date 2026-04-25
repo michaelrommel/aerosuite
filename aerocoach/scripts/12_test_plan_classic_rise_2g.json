@@ -1,7 +1,7 @@
 {
-	"plan_id": "Morning Riser 100MBit/s",
+	"plan_id": "Morning Riser 2GBit/s",
 	"slice_duration_ms": 60000,
-	"total_bandwidth_bps": 13107200,
+	"total_bandwidth_bps": 268435456,
 	"file_distribution": {
 		"buckets": [
 			{
@@ -65,11 +65,6 @@
 		{ "slice_index": 31, "total_connections": 200 },
 		{ "slice_index": 32, "total_connections": 100 },
 		{ "slice_index": 33, "total_connections": 0 },
-		{ "slice_index": 34, "total_connections": 0 },
-		{ "slice_index": 35, "total_connections": 0 },
-		{ "slice_index": 36, "total_connections": 0 },
-		{ "slice_index": 37, "total_connections": 0 },
-		{ "slice_index": 38, "total_connections": 0 },
-		{ "slice_index": 39, "total_connections": 0 }
+		{ "slice_index": 34, "total_connections": 0 }
 	]
 }
