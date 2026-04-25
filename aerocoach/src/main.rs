@@ -50,7 +50,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
 use aeroproto::aeromonitor::agent_service_server::AgentServiceServer;
-use aeroproto::aeromonitor::{coach_command, CoachCommand, LoadPlanUpdate, ShutdownCmd, TimeSlice, TransferRecord};
+use aeroproto::aeromonitor::{coach_command, CoachCommand, LoadPlanUpdate, ShutdownCmd, TimeSlice};
 
 use crate::config::Config;
 use crate::grpc::agent_service::AgentServiceImpl;
@@ -152,6 +152,13 @@ async fn main() -> Result<()> {
             let mut ticker = tokio::time::interval(Duration::from_secs(3));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+            // Deadline after which the NDJSON writer is force-closed even if
+            // some agents have not yet reported active_connections == 0.
+            // Set the first time we observe `is_done`; cleared on reset.
+            // The generous 120 s window covers the full 60 s graceful-drain
+            // timeout on the agent side, plus network RTT and a safety margin.
+            let mut writer_close_deadline: Option<std::time::Instant> = None;
+
             loop {
                 ticker.tick().await;
 
@@ -174,58 +181,58 @@ async fn main() -> Result<()> {
                         .unwrap_or(0);
                     let ws_tx = write.ws_tx.clone();
 
-                    // Write drained records to NDJSON file.
+                    // ── NDJSON writer ──────────────────────────────────────────────────
                     let is_done = write.coach_state.is_done();
+
+                    // Maintain the writer-close deadline.
+                    //   • Set it the first time we observe `is_done` so we have
+                    //     a hard upper bound even if an agent crashes mid-drain.
+                    //   • Clear it whenever we are not Done (coach was reset)
+                    //     so the next test run starts with a fresh deadline.
+                    if is_done && writer_close_deadline.is_none() {
+                        writer_close_deadline = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_secs(120),
+                        );
+                    } else if !is_done {
+                        writer_close_deadline = None;
+                    }
+
+                    // Close the writer once all agents have finished draining
+                    // (every agent reports active_connections == 0 in its final
+                    // MetricsUpdate) or the hard deadline has been exceeded.
+                    //
+                    // By waiting for agents to self-report, the NDJSON file
+                    // receives the rich in-flight-at-test-end records that
+                    // aerogym sends immediately on receiving ShutdownCmd
+                    // (actual filename, bytes so far, file size, start time,
+                    // time-slice, etc.) instead of coarse fabricated
+                    // placeholders based on registry connection counters.
+                    let agents_still_draining =
+                        snapshot.iter().any(|a| a.active_connections > 0);
+                    let deadline_exceeded = writer_close_deadline
+                        .map(|d| std::time::Instant::now() >= d)
+                        .unwrap_or(false);
+                    let should_close_writer =
+                        is_done && (!agents_still_draining || deadline_exceeded);
+
                     if let Some(ref mut writer) = write.record_writer {
                         for (agent_id, record) in &drained {
                             if let Err(e) = writer.append(agent_id, record) {
                                 warn!(error = %e, "NDJSON append failed");
                             }
                         }
-                        // Once the test is done, synthesize error records for any
-                        // in-flight (incomplete) transfers, flush, and close the writer.
-                        if is_done {
-                            let now_ms = chrono::Utc::now().timestamp_millis();
-                            let mut incomplete_total: u32 = 0;
-                            for agent in &snapshot {
-                                if agent.active_connections == 0 {
-                                    continue;
-                                }
-                                incomplete_total += agent.active_connections;
-                                for conn_idx in 0..agent.active_connections {
-                                    let record = TransferRecord {
-                                        filename: format!(
-                                            "{}_slice{}_incomplete_{}",
-                                            agent.agent_id,
-                                            agent.current_slice,
-                                            conn_idx
-                                        ),
-                                        bucket_id:         String::new(),
-                                        bytes_transferred: 0,
-                                        file_size_bytes:   0,
-                                        bandwidth_kibps:   0,
-                                        success:           false,
-                                        error_reason:      Some(
-                                            "transfer incomplete: test ended before completion"
-                                                .to_string(),
-                                        ),
-                                        start_time_ms: 0,
-                                        end_time_ms:   now_ms,
-                                        time_slice:    agent.current_slice,
-                                    };
-                                    if let Err(e) = writer.append(&agent.agent_id, &record) {
-                                        warn!(
-                                            error    = %e,
-                                            agent_id = %agent.agent_id,
-                                            "NDJSON append failed for incomplete transfer"
-                                        );
-                                    }
-                                }
-                            }
-                            if incomplete_total > 0 {
+                        if should_close_writer {
+                            if deadline_exceeded && agents_still_draining {
+                                let still: Vec<_> = snapshot
+                                    .iter()
+                                    .filter(|a| a.active_connections > 0)
+                                    .map(|a| a.agent_id.as_str())
+                                    .collect();
                                 warn!(
-                                    count = incomplete_total,
-                                    "wrote synthetic error records for incomplete in-flight transfers"
+                                    agents = ?still,
+                                    "force-closing NDJSON writer after 120 s timeout; \
+                                     some agents may still be draining"
                                 );
                             }
                             if let Err(e) = writer.flush() {
@@ -233,9 +240,8 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    // Only log + drop the writer once — if it was already None
-                    // (every subsequent tick after Done) this is a no-op.
-                    if is_done && write.record_writer.take().is_some() {
+                    // Only drop the writer once — a no-op on every subsequent tick.
+                    if should_close_writer && write.record_writer.take().is_some() {
                         info!("NDJSON record file closed");
                     }
 

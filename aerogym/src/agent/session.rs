@@ -484,9 +484,9 @@ async fn shutdown(
     agent_id: &str,
     active_tasks: &mut JoinSet<TransferOutcome>,
     metrics: &mut MetricsAccumulator,
-    // Taken by value (mut) so we can remove completed entries and synthesise
-    // error records only for tasks that were truly aborted.
-    mut in_flight: HashMap<u64, InFlightInfo>,
+    // Taken by value so we can consume its entries for synthesis in the
+    // non-graceful path.  Graceful path only reads (iterates) it.
+    in_flight: HashMap<u64, InFlightInfo>,
     // Kept open during the graceful drain so we can react to an abort
     // command (graceful=false) or stream closure (coach reset / network drop).
     inbound: &mut tonic::Streaming<CoachCommand>,
@@ -495,6 +495,64 @@ async fn shutdown(
     if graceful {
         let n = active_tasks.len();
         info!(tasks = n, "waiting for in-flight transfers to finish");
+
+        // ── Immediate in-flight snapshot ──────────────────────────────────────
+        // Report every currently in-flight transfer to aerocoach right away,
+        // BEFORE the graceful drain starts.
+        //
+        // Sending immediately (with active_connections = 0) tells the coach
+        // that this agent is done producing metrics.  Once all agents have
+        // reported active_connections == 0 the coach closes the NDJSON writer,
+        // so the report is typically available within one 3-second delta tick
+        // after the test ends — no need to wait for the full 60-second drain.
+        //
+        // Each record carries real data: filename, bytes sent so far (from the
+        // atomic counter that is updated as data flows through the upload),
+        // file size, start time, and the time-slice.  bandwidth_kibps is
+        // calculated from the actual bytes and elapsed time.  The drain that
+        // follows is purely an infrastructure cool-down; those completion
+        // outcomes are intentionally not reported.
+        let snapshot_ms = now_ms();
+        for (&conn_id, info) in &in_flight {
+            let bytes       = info.bytes_sent.load(Ordering::Relaxed);
+            let elapsed_ms  = (snapshot_ms - info.start_ms).max(1) as u64;
+            let bandwidth_kibps = if bytes > 0 {
+                ((bytes / 1024) * 1000 / elapsed_ms) as u32
+            } else {
+                0
+            };
+            metrics.record(TransferOutcome {
+                conn_id,
+                filename:          info.filename.clone(),
+                bucket_id:         info.bucket_id.clone(),
+                bytes_transferred: bytes,
+                file_size_bytes:   info.file_size_bytes,
+                bandwidth_kibps,
+                success:           false,
+                error_reason:      Some(
+                    "in-flight: transfer was still running when the test ended"
+                        .into(),
+                ),
+                start_time_ms: info.start_ms,
+                end_time_ms:   snapshot_ms,
+                time_slice:    info.time_slice,
+            });
+        }
+        info!(
+            count = in_flight.len(),
+            "sending in-flight snapshot to aerocoach (active_connections = 0)"
+        );
+        // active_connections = 0 is the signal aerocoach uses to detect that
+        // this agent has finished reporting.  force = true so we always send
+        // the message, even when in_flight was empty (no transfers at shutdown).
+        if let Some(update) = metrics.drain_into_update(0, 0, 0, true) {
+            if let Err(e) = report_tx
+                .send(make_metrics_report(agent_id, update))
+                .await
+            {
+                warn!(error = %e, "failed to send in-flight snapshot");
+            }
+        }
 
         let deadline = tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT);
         tokio::pin!(deadline);
@@ -553,68 +611,79 @@ async fn shutdown(
                     break;
                 }
 
-                // ── 3. Normal transfer completion ────────────────────────────
-                // Record outcome and remove from in_flight so only
-                // truly-aborted entries remain after the loop.
+                // ── 3. Drain transfer completions silently ───────────────────
+                // We are only letting the infrastructure cool down.  Outcomes
+                // are not recorded — the snapshot sent above is the complete
+                // metric contribution for this agent.
                 result = active_tasks.join_next() => {
                     match result {
-                        Some(Ok(outcome))  => {
-                            in_flight.remove(&outcome.conn_id);
-                            metrics.record(outcome);
-                        }
-                        Some(Err(e))       => warn!(error = %e, "transfer task panicked"),
-                        None               => break, // all tasks finished cleanly
+                        Some(Ok(_))  => { /* drain silently */ }
+                        Some(Err(e)) => warn!(error = %e, "transfer task panicked during drain"),
+                        None         => break, // all tasks finished cleanly
                     }
                 }
             }
         }
-    } else {
-        active_tasks.shutdown().await;
+        // Graceful path is complete.  The in-flight snapshot was already sent;
+        // the drain above was purely an infrastructure cool-down with no
+        // metrics of interest.  Drop the sender to close the gRPC stream.
+        drop(report_tx);
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        info!("graceful shutdown complete");
+        return Ok(());
     }
 
-    // Any entries remaining in in_flight were aborted (either by the graceful
-    // drain timeout or the non-graceful shutdown path).  Synthesize an error
-    // record for each one so the final report always accounts for them.
+    // ── Non-graceful path ──────────────────────────────────────────────────
+    // Abort all in-flight tasks immediately, then synthesise error records
+    // and send a final MetricsUpdate so the coach has a record of every
+    // transfer that was running when the abort arrived.
+    active_tasks.shutdown().await;
+
     let abort_end_ms = now_ms();
     for (conn_id, info) in in_flight {
         let bytes = info.bytes_sent.load(Ordering::Relaxed);
         warn!(
             conn_id,
-            filename = %info.filename,
+            filename   = %info.filename,
             bytes_sent = bytes,
-            "transfer aborted - synthesising error record"
+            "transfer aborted (non-graceful shutdown) — synthesising error record"
         );
+        let elapsed_ms = (abort_end_ms - info.start_ms).max(1) as u64;
+        let bandwidth_kibps = if bytes > 0 {
+            ((bytes / 1024) * 1000 / elapsed_ms) as u32
+        } else {
+            0
+        };
         metrics.record(TransferOutcome {
             conn_id,
-            filename:        info.filename,
-            bucket_id:       info.bucket_id,
+            filename:          info.filename,
+            bucket_id:         info.bucket_id,
             bytes_transferred: bytes,
-            file_size_bytes: info.file_size_bytes,
-            bandwidth_kibps: 0,
-            success:         false,
-            error_reason:    Some("transfer aborted: test ended before completion".into()),
-            start_time_ms:   info.start_ms,
-            end_time_ms:     abort_end_ms,
-            time_slice:      info.time_slice,
+            file_size_bytes:   info.file_size_bytes,
+            bandwidth_kibps,
+            success:           false,
+            error_reason:      Some("transfer aborted: test ended before completion".into()),
+            start_time_ms:     info.start_ms,
+            end_time_ms:       abort_end_ms,
+            time_slice:        info.time_slice,
         });
     }
 
-    // Final metrics flush (force=true so we always send at least one update).
+    // Send the final flush (force=true so the message is always sent even
+    // when there were no in-flight transfers at abort time).
     if let Some(update) = metrics.drain_into_update(0, 0, 0, true) {
         let _ = report_tx
             .send(make_metrics_report(agent_id, update))
             .await;
     }
 
-    // Explicitly drop the sender.  This closes the mpsc channel, which
-    // causes ReceiverStream to signal end-of-stream.  Yielding twice
-    // gives the tokio runtime a chance to poll the stream and forward
-    // the final message through the gRPC transport before we return.
+    // Drop the sender to close the gRPC stream.
     drop(report_tx);
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
 
-    info!("shutdown complete");
+    info!("non-graceful shutdown complete");
     Ok(())
 }
 
