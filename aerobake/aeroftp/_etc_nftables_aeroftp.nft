@@ -77,8 +77,8 @@ table inet filter {
 		policy accept
 
 		# Mark metrics responses only when the destination is outside the backend subnet
-		tcp sport 9090 ip daddr != 172.16.32.0/26 meta mark set 14
-		tcp sport 9100 ip daddr != 172.16.32.0/26 meta mark set 14
+		tcp sport 9090 ip daddr != 172.16.32.0/26 meta mark set 14 ct mark set 14
+		tcp sport 9100 ip daddr != 172.16.32.0/26 meta mark set 14 ct mark set 14
 
 		# HACK: route specific SSH packets back to my server for direct login
 		ip daddr 195.201.133.194 tcp sport 22 meta mark set 13
