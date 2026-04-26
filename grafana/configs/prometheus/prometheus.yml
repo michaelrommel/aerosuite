@@ -1,0 +1,89 @@
+global:
+  scrape_interval:     15s
+  scrape_timeout:      10s
+  evaluation_interval: 15s
+
+  external_labels:
+    cluster: aeroftp-cluster
+    env:     production
+
+# ---------------------------------------------------------------------------
+# Remote-write to Mimir (co-located in the same ECS task, localhost)
+# ---------------------------------------------------------------------------
+remote_write:
+  - url: http://localhost:9009/api/v1/push
+    queue_config:
+      max_samples_per_send: 2000
+      max_shards:           10
+      capacity:             5000
+
+# ---------------------------------------------------------------------------
+# Static scrape targets: aeroftp nodes 172.16.32.20 – 172.16.32.39
+# port 9090 → aeroftp application metrics (libunftp / aeroftp)
+# port 9100 → node_exporter system metrics
+# ---------------------------------------------------------------------------
+scrape_configs:
+  - job_name: aeroftp
+    static_configs:
+      - targets:
+          - '172.16.32.20:9090'
+          - '172.16.32.21:9090'
+          - '172.16.32.22:9090'
+          - '172.16.32.23:9090'
+          - '172.16.32.24:9090'
+          - '172.16.32.25:9090'
+          - '172.16.32.26:9090'
+          - '172.16.32.27:9090'
+          - '172.16.32.28:9090'
+          - '172.16.32.29:9090'
+          - '172.16.32.30:9090'
+          - '172.16.32.31:9090'
+          - '172.16.32.32:9090'
+          - '172.16.32.33:9090'
+          - '172.16.32.34:9090'
+          - '172.16.32.35:9090'
+          - '172.16.32.36:9090'
+          - '172.16.32.37:9090'
+          - '172.16.32.38:9090'
+          - '172.16.32.39:9090'
+        labels:
+          subnet: '172.16.32.0/24'
+
+    relabel_configs:
+      # Derive a short instance label from the host IP (drops the port)
+      - source_labels: [__address__]
+        regex:         '([^:]+):\d+'
+        target_label:  instance
+        replacement:   '$1'
+
+  - job_name: node-exporter
+    static_configs:
+      - targets:
+          - '172.16.32.20:9100'
+          - '172.16.32.21:9100'
+          - '172.16.32.22:9100'
+          - '172.16.32.23:9100'
+          - '172.16.32.24:9100'
+          - '172.16.32.25:9100'
+          - '172.16.32.26:9100'
+          - '172.16.32.27:9100'
+          - '172.16.32.28:9100'
+          - '172.16.32.29:9100'
+          - '172.16.32.30:9100'
+          - '172.16.32.31:9100'
+          - '172.16.32.32:9100'
+          - '172.16.32.33:9100'
+          - '172.16.32.34:9100'
+          - '172.16.32.35:9100'
+          - '172.16.32.36:9100'
+          - '172.16.32.37:9100'
+          - '172.16.32.38:9100'
+          - '172.16.32.39:9100'
+        labels:
+          subnet: '172.16.32.0/24'
+
+    relabel_configs:
+      - source_labels: [__address__]
+        regex:         '([^:]+):\d+'
+        target_label:  instance
+        replacement:   '$1'

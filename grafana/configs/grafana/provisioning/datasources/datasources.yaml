@@ -1,0 +1,48 @@
+apiVersion: 1
+
+# ---------------------------------------------------------------------------
+# Datasources auto-provisioned on Grafana startup.
+# All services are co-located in the same ECS task (awsvpc), so every
+# backend is reachable via localhost.
+# ---------------------------------------------------------------------------
+datasources:
+
+  - name:      Prometheus
+    type:      prometheus
+    uid:       prometheus
+    url:       http://localhost:9090
+    access:    proxy
+    isDefault: true
+    jsonData:
+      timeInterval:        15s
+      httpMethod:          POST
+      exemplarTraceIdDestinations:
+        - name:       traceID
+          datasourceUid: tempo
+
+  - name:   Mimir
+    type:   prometheus
+    uid:    mimir
+    url:    http://localhost:9009/prometheus
+    access: proxy
+    jsonData:
+      timeInterval: 15s
+      httpMethod:   POST
+
+  - name:   Tempo
+    type:   tempo
+    uid:    tempo
+    url:    http://localhost:3200
+    access: proxy
+    jsonData:
+      httpMethod:      GET
+      tracesToLogsV2:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+      lokiSearch:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      spanBar:
+        type: None

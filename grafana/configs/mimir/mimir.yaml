@@ -1,0 +1,74 @@
+# Grafana Mimir — monolithic (single-process) mode
+# Runs all components in one binary; suitable for a single ECS task.
+# For a production deployment consider the microservices or read-write split
+# deployment modes and replace the local filesystem backend with S3.
+
+target: all
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  grpc_listen_port: 9096
+  log_level:        info
+
+# ---------------------------------------------------------------------------
+# Common storage — ephemeral local filesystem.
+# Replace with an S3 backend for durability across task restarts.
+# ---------------------------------------------------------------------------
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /tmp/mimir/data
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /tmp/mimir/data/tsdb
+  bucket_store:
+    sync_dir: /tmp/mimir/tsdb-sync
+  tsdb:
+    dir: /tmp/mimir/tsdb
+
+compactor:
+  data_dir: /tmp/mimir/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    instance_addr:      127.0.0.1
+    kvstore:
+      store:            memberlist
+    replication_factor: 1
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /tmp/mimir/rules
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+# ---------------------------------------------------------------------------
+# Memberlist (gossip) — single-node, no peers needed in monolithic mode
+# ---------------------------------------------------------------------------
+memberlist:
+  join_members: []
+
+# ---------------------------------------------------------------------------
+# Limits — sensible defaults for a monitoring sidecar task
+# ---------------------------------------------------------------------------
+limits:
+  ingestion_rate:             30000
+  ingestion_burst_size:       50000
+  max_global_series_per_user: 500000
+  compactor_blocks_retention_period: 30d

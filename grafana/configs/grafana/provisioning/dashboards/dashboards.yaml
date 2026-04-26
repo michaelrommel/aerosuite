@@ -1,0 +1,16 @@
+apiVersion: 1
+
+providers:
+  - name: aeroftp
+    orgId: 1
+    type: file
+    disableDeletion: false
+    # Grafana polls this directory every 30 s; a re-deployed task picks up
+    # a freshly written JSON automatically.
+    updateIntervalSeconds: 30
+    # Lets you tweak a panel in the UI without the file overwriting it
+    # on the next poll.  Export and commit the JSON to persist changes.
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

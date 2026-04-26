@@ -1,0 +1,321 @@
+{
+  "family": "aeromon",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "4096",
+  "memory": "16384",
+  "executionRoleArn": "arn:aws:iam::295934382486:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::295934382486:role/ecsTaskExecutionRoleWithSSM",
+  "ephemeralStorage": {
+    "sizeInGiB": 30
+  },
+  "volumes": [
+    {
+      "name": "prometheus-config"
+    },
+    {
+      "name": "tempo-config"
+    },
+    {
+      "name": "mimir-config"
+    },
+    {
+      "name": "grafana-config"
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "config-init",
+      "image": "alpine:3.19",
+      "essential": true,
+      "mountPoints": [
+        {
+          "sourceVolume": "prometheus-config",
+          "containerPath": "/cfg/prometheus"
+        },
+        {
+          "sourceVolume": "tempo-config",
+          "containerPath": "/cfg/tempo"
+        },
+        {
+          "sourceVolume": "mimir-config",
+          "containerPath": "/cfg/mimir"
+        },
+        {
+          "sourceVolume": "grafana-config",
+          "containerPath": "/cfg/grafana"
+        }
+      ],
+      "command": [
+        "/bin/sh",
+        "-c",
+        "set -e\nmkdir -p \\\n    /cfg/prometheus \\\n    /cfg/tempo \\\n    /cfg/mimir \\\n    /cfg/grafana/datasources \\\n    /cfg/grafana/dashboards\n\ncat > /cfg/prometheus/prometheus.yml << 'PROMEOF'\nglobal:\n  scrape_interval:     15s\n  scrape_timeout:      10s\n  evaluation_interval: 15s\n\n  external_labels:\n    cluster: aeroftp-cluster\n    env:     production\n\n# ---------------------------------------------------------------------------\n# Remote-write to Mimir (co-located in the same ECS task, localhost)\n# ---------------------------------------------------------------------------\nremote_write:\n  - url: http://localhost:9009/api/v1/push\n    queue_config:\n      max_samples_per_send: 2000\n      max_shards:           10\n      capacity:             5000\n\n# ---------------------------------------------------------------------------\n# Static scrape targets: aeroftp nodes 172.16.32.20 \u2013 172.16.32.39\n# port 9090 \u2192 aeroftp application metrics (libunftp / aeroftp)\n# port 9100 \u2192 node_exporter system metrics\n# ---------------------------------------------------------------------------\nscrape_configs:\n  - job_name: aeroftp\n    static_configs:\n      - targets:\n          - '172.16.32.20:9090'\n          - '172.16.32.21:9090'\n          - '172.16.32.22:9090'\n          - '172.16.32.23:9090'\n          - '172.16.32.24:9090'\n          - '172.16.32.25:9090'\n          - '172.16.32.26:9090'\n          - '172.16.32.27:9090'\n          - '172.16.32.28:9090'\n          - '172.16.32.29:9090'\n          - '172.16.32.30:9090'\n          - '172.16.32.31:9090'\n          - '172.16.32.32:9090'\n          - '172.16.32.33:9090'\n          - '172.16.32.34:9090'\n          - '172.16.32.35:9090'\n          - '172.16.32.36:9090'\n          - '172.16.32.37:9090'\n          - '172.16.32.38:9090'\n          - '172.16.32.39:9090'\n        labels:\n          subnet: '172.16.32.0/24'\n\n    relabel_configs:\n      # Derive a short instance label from the host IP (drops the port)\n      - source_labels: [__address__]\n        regex:         '([^:]+):\\d+'\n        target_label:  instance\n        replacement:   '$1'\n\n  - job_name: node-exporter\n    static_configs:\n      - targets:\n          - '172.16.32.20:9100'\n          - '172.16.32.21:9100'\n          - '172.16.32.22:9100'\n          - '172.16.32.23:9100'\n          - '172.16.32.24:9100'\n          - '172.16.32.25:9100'\n          - '172.16.32.26:9100'\n          - '172.16.32.27:9100'\n          - '172.16.32.28:9100'\n          - '172.16.32.29:9100'\n          - '172.16.32.30:9100'\n          - '172.16.32.31:9100'\n          - '172.16.32.32:9100'\n          - '172.16.32.33:9100'\n          - '172.16.32.34:9100'\n          - '172.16.32.35:9100'\n          - '172.16.32.36:9100'\n          - '172.16.32.37:9100'\n          - '172.16.32.38:9100'\n          - '172.16.32.39:9100'\n        labels:\n          subnet: '172.16.32.0/24'\n\n    relabel_configs:\n      - source_labels: [__address__]\n        regex:         '([^:]+):\\d+'\n        target_label:  instance\n        replacement:   '$1'\n\nPROMEOF\n\ncat > /cfg/tempo/tempo.yaml << 'TEMPOEOF'\n# Grafana Tempo \u2014 monolithic (single-binary) mode\n# All containers in the same ECS task share the same network namespace\n# (awsvpc mode), so every service is reachable via localhost.\n\nserver:\n  http_listen_port: 3200\n  grpc_listen_port: 9095\n  log_level:        info\n\n# ---------------------------------------------------------------------------\n# Trace receivers\n# ---------------------------------------------------------------------------\ndistributor:\n  receivers:\n    otlp:\n      protocols:\n        grpc:\n          endpoint: 0.0.0.0:4317\n        http:\n          endpoint: 0.0.0.0:4318\n    zipkin:\n      endpoint: 0.0.0.0:9411\n\n# ---------------------------------------------------------------------------\n# Ingester\n# ---------------------------------------------------------------------------\ningester:\n  max_block_duration: 5m   # cut a block every 5 minutes in single-process mode\n\n# ---------------------------------------------------------------------------\n# Storage \u2014 ephemeral local storage suitable for Fargate tasks.\n# For persistence across task restarts mount an EFS path here.\n# ---------------------------------------------------------------------------\nstorage:\n  trace:\n    backend: local\n    local:\n      path: /tmp/tempo/blocks\n    wal:\n      path: /tmp/tempo/wal\n\n# ---------------------------------------------------------------------------\n# Compaction\n# ---------------------------------------------------------------------------\ncompactor:\n  compaction:\n    block_retention: 48h\n\n# ---------------------------------------------------------------------------\n# Metrics generator \u2014 remote-writes span-derived metrics to Mimir\n# ---------------------------------------------------------------------------\nmetrics_generator:\n  registry:\n    external_labels:\n      cluster: aeroftp-cluster\n  storage:\n    path:       /tmp/tempo/generator/wal\n    remote_write:\n      - url: http://localhost:9009/api/v1/push\n\noverrides:\n  defaults:\n    metrics_generator:\n      processors:\n        - service-graphs\n        - span-metrics\n\nTEMPOEOF\n\ncat > /cfg/mimir/mimir.yaml << 'MIMIREOF'\n# Grafana Mimir \u2014 monolithic (single-process) mode\n# Runs all components in one binary; suitable for a single ECS task.\n# For a production deployment consider the microservices or read-write split\n# deployment modes and replace the local filesystem backend with S3.\n\ntarget: all\nmultitenancy_enabled: false\n\nserver:\n  http_listen_port: 9009\n  grpc_listen_port: 9096\n  log_level:        info\n\n# ---------------------------------------------------------------------------\n# Common storage \u2014 ephemeral local filesystem.\n# Replace with an S3 backend for durability across task restarts.\n# ---------------------------------------------------------------------------\ncommon:\n  storage:\n    backend: filesystem\n    filesystem:\n      dir: /tmp/mimir/data\n\nblocks_storage:\n  backend: filesystem\n  filesystem:\n    dir: /tmp/mimir/data/tsdb\n  bucket_store:\n    sync_dir: /tmp/mimir/tsdb-sync\n  tsdb:\n    dir: /tmp/mimir/tsdb\n\ncompactor:\n  data_dir: /tmp/mimir/compactor\n  sharding_ring:\n    kvstore:\n      store: memberlist\n\ndistributor:\n  ring:\n    instance_addr: 127.0.0.1\n    kvstore:\n      store: memberlist\n\ningester:\n  ring:\n    instance_addr:      127.0.0.1\n    kvstore:\n      store:            memberlist\n    replication_factor: 1\n\nruler_storage:\n  backend: filesystem\n  filesystem:\n    dir: /tmp/mimir/rules\n\nstore_gateway:\n  sharding_ring:\n    replication_factor: 1\n\n# ---------------------------------------------------------------------------\n# Memberlist (gossip) \u2014 single-node, no peers needed in monolithic mode\n# ---------------------------------------------------------------------------\nmemberlist:\n  join_members: []\n\n# ---------------------------------------------------------------------------\n# Limits \u2014 sensible defaults for a monitoring sidecar task\n# ---------------------------------------------------------------------------\nlimits:\n  ingestion_rate:             30000\n  ingestion_burst_size:       50000\n  max_global_series_per_user: 500000\n  compactor_blocks_retention_period: 30d\n\nMIMIREOF\n\ncat > /cfg/grafana/datasources/datasources.yaml << 'GRAFANAEOF'\napiVersion: 1\n\n# ---------------------------------------------------------------------------\n# Datasources auto-provisioned on Grafana startup.\n# All services are co-located in the same ECS task (awsvpc), so every\n# backend is reachable via localhost.\n# ---------------------------------------------------------------------------\ndatasources:\n\n  - name:      Prometheus\n    type:      prometheus\n    uid:       prometheus\n    url:       http://localhost:9090\n    access:    proxy\n    isDefault: true\n    jsonData:\n      timeInterval:        15s\n      httpMethod:          POST\n      exemplarTraceIdDestinations:\n        - name:       traceID\n          datasourceUid: tempo\n\n  - name:   Mimir\n    type:   prometheus\n    uid:    mimir\n    url:    http://localhost:9009/prometheus\n    access: proxy\n    jsonData:\n      timeInterval: 15s\n      httpMethod:   POST\n\n  - name:   Tempo\n    type:   tempo\n    uid:    tempo\n    url:    http://localhost:3200\n    access: proxy\n    jsonData:\n      httpMethod:      GET\n      tracesToLogsV2:\n        datasourceUid: prometheus\n      serviceMap:\n        datasourceUid: prometheus\n      lokiSearch:\n        datasourceUid: prometheus\n      nodeGraph:\n        enabled: true\n      spanBar:\n        type: None\n\nGRAFANAEOF\n\ncat > /cfg/grafana/dashboards/dashboards.yaml << 'DASHPROVEOF'\napiVersion: 1\n\nproviders:\n  - name: aeroftp\n    orgId: 1\n    type: file\n    disableDeletion: false\n    # Grafana polls this directory every 30 s; a re-deployed task picks up\n    # a freshly written JSON automatically.\n    updateIntervalSeconds: 30\n    # Lets you tweak a panel in the UI without the file overwriting it\n    # on the next poll.  Export and commit the JSON to persist changes.\n    allowUiUpdates: true\n    options:\n      path: /etc/grafana/provisioning/dashboards\n      foldersFromFilesStructure: false\n\nDASHPROVEOF\n\ncat > /cfg/grafana/dashboards/aeroftp.json << 'AEROFTPJSONEOF'\n{\n  \"annotations\": {\n    \"list\": []\n  },\n  \"description\": \"AeroFTP node metrics \\u2014 sessions, throughput, file transfers, FTP commands and errors.\",\n  \"editable\": true,\n  \"fiscalYearStartMonth\": 0,\n  \"graphTooltip\": 1,\n  \"id\": null,\n  \"links\": [],\n  \"panels\": [\n    {\n      \"id\": 1,\n      \"type\": \"stat\",\n      \"title\": \"Active Sessions\",\n      \"gridPos\": {\n        \"h\": 4,\n        \"w\": 5,\n        \"x\": 0,\n        \"y\": 0\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"colorMode\": \"value\",\n        \"graphMode\": \"area\",\n        \"justifyMode\": \"auto\",\n        \"orientation\": \"auto\",\n        \"reduceOptions\": {\n          \"calcs\": [\n            \"lastNotNull\"\n          ],\n          \"fields\": \"\",\n          \"values\": false\n        },\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"thresholds\"\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              },\n              {\n                \"color\": \"yellow\",\n                \"value\": 50\n              },\n              {\n                \"color\": \"red\",\n                \"value\": 100\n              }\n            ]\n          },\n          \"unit\": \"short\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum(ftp_sessions_total{job=\\\"aeroftp\\\"})\",\n          \"instant\": true,\n          \"legendFormat\": \"__auto\"\n        }\n      ]\n    },\n    {\n      \"id\": 2,\n      \"type\": \"stat\",\n      \"title\": \"Instances Up\",\n      \"gridPos\": {\n        \"h\": 4,\n        \"w\": 4,\n        \"x\": 5,\n        \"y\": 0\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"colorMode\": \"value\",\n        \"graphMode\": \"area\",\n        \"justifyMode\": \"auto\",\n        \"orientation\": \"auto\",\n        \"reduceOptions\": {\n          \"calcs\": [\n            \"lastNotNull\"\n          ],\n          \"fields\": \"\",\n          \"values\": false\n        },\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"thresholds\"\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"red\",\n                \"value\": null\n              },\n              {\n                \"color\": \"yellow\",\n                \"value\": 1\n              },\n              {\n                \"color\": \"green\",\n                \"value\": 5\n              }\n            ]\n          },\n          \"unit\": \"short\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"count(up{job=\\\"aeroftp\\\"} == 1)\",\n          \"instant\": true,\n          \"legendFormat\": \"__auto\"\n        }\n      ]\n    },\n    {\n      \"id\": 3,\n      \"type\": \"stat\",\n      \"title\": \"Upload Rate\",\n      \"gridPos\": {\n        \"h\": 4,\n        \"w\": 5,\n        \"x\": 9,\n        \"y\": 0\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"colorMode\": \"value\",\n        \"graphMode\": \"area\",\n        \"justifyMode\": \"auto\",\n        \"orientation\": \"auto\",\n        \"reduceOptions\": {\n          \"calcs\": [\n            \"lastNotNull\"\n          ],\n          \"fields\": \"\",\n          \"values\": false\n        },\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"thresholds\"\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"Bps\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum(rate(ftp_backend_write_bytes{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"instant\": false,\n          \"legendFormat\": \"__auto\"\n        }\n      ]\n    },\n    {\n      \"id\": 4,\n      \"type\": \"stat\",\n      \"title\": \"Download Rate\",\n      \"gridPos\": {\n        \"h\": 4,\n        \"w\": 5,\n        \"x\": 14,\n        \"y\": 0\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"colorMode\": \"value\",\n        \"graphMode\": \"area\",\n        \"justifyMode\": \"auto\",\n        \"orientation\": \"auto\",\n        \"reduceOptions\": {\n          \"calcs\": [\n            \"lastNotNull\"\n          ],\n          \"fields\": \"\",\n          \"values\": false\n        },\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"thresholds\"\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"Bps\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum(rate(ftp_backend_read_bytes{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"instant\": false,\n          \"legendFormat\": \"__auto\"\n        }\n      ]\n    },\n    {\n      \"id\": 5,\n      \"type\": \"stat\",\n      \"title\": \"Auth Failures / s\",\n      \"gridPos\": {\n        \"h\": 4,\n        \"w\": 5,\n        \"x\": 19,\n        \"y\": 0\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"colorMode\": \"value\",\n        \"graphMode\": \"area\",\n        \"justifyMode\": \"auto\",\n        \"orientation\": \"auto\",\n        \"reduceOptions\": {\n          \"calcs\": [\n            \"lastNotNull\"\n          ],\n          \"fields\": \"\",\n          \"values\": false\n        },\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"thresholds\"\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              },\n              {\n                \"color\": \"yellow\",\n                \"value\": 0.01\n              },\n              {\n                \"color\": \"red\",\n                \"value\": 0.1\n              }\n            ]\n          },\n          \"unit\": \"ops\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum(rate(ftp_auth_failures{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"instant\": false,\n          \"legendFormat\": \"__auto\"\n        }\n      ]\n    },\n    {\n      \"id\": 6,\n      \"type\": \"timeseries\",\n      \"title\": \"Active Sessions by Instance\",\n      \"gridPos\": {\n        \"h\": 8,\n        \"w\": 12,\n        \"x\": 0,\n        \"y\": 4\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"legend\": {\n          \"calcs\": [\n            \"lastNotNull\",\n            \"max\"\n          ],\n          \"displayMode\": \"table\",\n          \"placement\": \"bottom\",\n          \"showLegend\": true\n        },\n        \"tooltip\": {\n          \"mode\": \"multi\",\n          \"sort\": \"desc\"\n        }\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"palette-classic\"\n          },\n          \"custom\": {\n            \"drawStyle\": \"line\",\n            \"fillOpacity\": 10,\n            \"lineInterpolation\": \"linear\",\n            \"lineWidth\": 1,\n            \"pointSize\": 5,\n            \"showPoints\": \"never\",\n            \"spanNulls\": true,\n            \"stacking\": {\n              \"group\": \"A\",\n              \"mode\": \"none\"\n            },\n            \"thresholdsStyle\": {\n              \"mode\": \"off\"\n            },\n            \"axisBorderShow\": false,\n            \"axisCenteredZero\": false,\n            \"axisColorMode\": \"text\",\n            \"axisLabel\": \"\",\n            \"axisPlacement\": \"auto\",\n            \"barAlignment\": 0,\n            \"gradientMode\": \"none\",\n            \"hideFrom\": {\n              \"legend\": false,\n              \"tooltip\": false,\n              \"viz\": false\n            },\n            \"insertNulls\": false,\n            \"scaleDistribution\": {\n              \"type\": \"linear\"\n            }\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"short\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"ftp_sessions_total{job=\\\"aeroftp\\\"}\",\n          \"legendFormat\": \"{{instance}}\"\n        }\n      ]\n    },\n    {\n      \"id\": 7,\n      \"type\": \"timeseries\",\n      \"title\": \"Throughput\",\n      \"gridPos\": {\n        \"h\": 8,\n        \"w\": 12,\n        \"x\": 12,\n        \"y\": 4\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"legend\": {\n          \"calcs\": [\n            \"lastNotNull\",\n            \"max\"\n          ],\n          \"displayMode\": \"table\",\n          \"placement\": \"bottom\",\n          \"showLegend\": true\n        },\n        \"tooltip\": {\n          \"mode\": \"multi\",\n          \"sort\": \"desc\"\n        }\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"palette-classic\"\n          },\n          \"custom\": {\n            \"drawStyle\": \"line\",\n            \"fillOpacity\": 10,\n            \"lineInterpolation\": \"linear\",\n            \"lineWidth\": 1,\n            \"pointSize\": 5,\n            \"showPoints\": \"never\",\n            \"spanNulls\": true,\n            \"stacking\": {\n              \"group\": \"A\",\n              \"mode\": \"none\"\n            },\n            \"thresholdsStyle\": {\n              \"mode\": \"off\"\n            },\n            \"axisBorderShow\": false,\n            \"axisCenteredZero\": false,\n            \"axisColorMode\": \"text\",\n            \"axisLabel\": \"\",\n            \"axisPlacement\": \"auto\",\n            \"barAlignment\": 0,\n            \"gradientMode\": \"none\",\n            \"hideFrom\": {\n              \"legend\": false,\n              \"tooltip\": false,\n              \"viz\": false\n            },\n            \"insertNulls\": false,\n            \"scaleDistribution\": {\n              \"type\": \"linear\"\n            }\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"Bps\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum by(instance)(rate(ftp_backend_write_bytes{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"\\u2191 {{instance}}\"\n        },\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"B\",\n          \"expr\": \"sum by(instance)(rate(ftp_backend_read_bytes{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"\\u2193 {{instance}}\"\n        }\n      ]\n    },\n    {\n      \"id\": 8,\n      \"type\": \"timeseries\",\n      \"title\": \"File Transfers / s\",\n      \"gridPos\": {\n        \"h\": 8,\n        \"w\": 12,\n        \"x\": 0,\n        \"y\": 12\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"legend\": {\n          \"calcs\": [\n            \"lastNotNull\",\n            \"max\"\n          ],\n          \"displayMode\": \"table\",\n          \"placement\": \"bottom\",\n          \"showLegend\": true\n        },\n        \"tooltip\": {\n          \"mode\": \"multi\",\n          \"sort\": \"desc\"\n        }\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"palette-classic\"\n          },\n          \"custom\": {\n            \"drawStyle\": \"line\",\n            \"fillOpacity\": 10,\n            \"lineInterpolation\": \"linear\",\n            \"lineWidth\": 1,\n            \"pointSize\": 5,\n            \"showPoints\": \"never\",\n            \"spanNulls\": true,\n            \"stacking\": {\n              \"group\": \"A\",\n              \"mode\": \"none\"\n            },\n            \"thresholdsStyle\": {\n              \"mode\": \"off\"\n            },\n            \"axisBorderShow\": false,\n            \"axisCenteredZero\": false,\n            \"axisColorMode\": \"text\",\n            \"axisLabel\": \"\",\n            \"axisPlacement\": \"auto\",\n            \"barAlignment\": 0,\n            \"gradientMode\": \"none\",\n            \"hideFrom\": {\n              \"legend\": false,\n              \"tooltip\": false,\n              \"viz\": false\n            },\n            \"insertNulls\": false,\n            \"scaleDistribution\": {\n              \"type\": \"linear\"\n            }\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"ops\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum by(command)(rate(ftp_transferred_total{job=\\\"aeroftp\\\",status=\\\"success\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"{{command}} \\u2713\"\n        },\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"B\",\n          \"expr\": \"sum by(command,status)(rate(ftp_transferred_total{job=\\\"aeroftp\\\",status!=\\\"success\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"{{command}} \\u2717 {{status}}\"\n        }\n      ]\n    },\n    {\n      \"id\": 9,\n      \"type\": \"timeseries\",\n      \"title\": \"FTP Commands / s\",\n      \"gridPos\": {\n        \"h\": 8,\n        \"w\": 12,\n        \"x\": 12,\n        \"y\": 12\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"legend\": {\n          \"calcs\": [\n            \"lastNotNull\",\n            \"max\"\n          ],\n          \"displayMode\": \"table\",\n          \"placement\": \"bottom\",\n          \"showLegend\": true\n        },\n        \"tooltip\": {\n          \"mode\": \"multi\",\n          \"sort\": \"desc\"\n        }\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"palette-classic\"\n          },\n          \"custom\": {\n            \"drawStyle\": \"line\",\n            \"fillOpacity\": 10,\n            \"lineInterpolation\": \"linear\",\n            \"lineWidth\": 1,\n            \"pointSize\": 5,\n            \"showPoints\": \"never\",\n            \"spanNulls\": true,\n            \"stacking\": {\n              \"group\": \"A\",\n              \"mode\": \"none\"\n            },\n            \"thresholdsStyle\": {\n              \"mode\": \"off\"\n            },\n            \"axisBorderShow\": false,\n            \"axisCenteredZero\": false,\n            \"axisColorMode\": \"text\",\n            \"axisLabel\": \"\",\n            \"axisPlacement\": \"auto\",\n            \"barAlignment\": 0,\n            \"gradientMode\": \"none\",\n            \"hideFrom\": {\n              \"legend\": false,\n              \"tooltip\": false,\n              \"viz\": false\n            },\n            \"insertNulls\": false,\n            \"scaleDistribution\": {\n              \"type\": \"linear\"\n            }\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"ops\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum by(command)(rate(ftp_command_total{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"{{command}}\"\n        }\n      ]\n    },\n    {\n      \"id\": 10,\n      \"type\": \"timeseries\",\n      \"title\": \"Error Rate by Type\",\n      \"gridPos\": {\n        \"h\": 8,\n        \"w\": 12,\n        \"x\": 0,\n        \"y\": 20\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"legend\": {\n          \"calcs\": [\n            \"lastNotNull\",\n            \"max\"\n          ],\n          \"displayMode\": \"table\",\n          \"placement\": \"bottom\",\n          \"showLegend\": true\n        },\n        \"tooltip\": {\n          \"mode\": \"multi\",\n          \"sort\": \"desc\"\n        }\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"palette-classic\"\n          },\n          \"custom\": {\n            \"drawStyle\": \"line\",\n            \"fillOpacity\": 10,\n            \"lineInterpolation\": \"linear\",\n            \"lineWidth\": 1,\n            \"pointSize\": 5,\n            \"showPoints\": \"never\",\n            \"spanNulls\": true,\n            \"stacking\": {\n              \"group\": \"A\",\n              \"mode\": \"none\"\n            },\n            \"thresholdsStyle\": {\n              \"mode\": \"off\"\n            },\n            \"axisBorderShow\": false,\n            \"axisCenteredZero\": false,\n            \"axisColorMode\": \"text\",\n            \"axisLabel\": \"\",\n            \"axisPlacement\": \"auto\",\n            \"barAlignment\": 0,\n            \"gradientMode\": \"none\",\n            \"hideFrom\": {\n              \"legend\": false,\n              \"tooltip\": false,\n              \"viz\": false\n            },\n            \"insertNulls\": false,\n            \"scaleDistribution\": {\n              \"type\": \"linear\"\n            }\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"ops\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum by(type)(rate(ftp_error_total{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"{{type}}\"\n        }\n      ]\n    },\n    {\n      \"id\": 11,\n      \"type\": \"timeseries\",\n      \"title\": \"Reply Codes / s\",\n      \"gridPos\": {\n        \"h\": 8,\n        \"w\": 12,\n        \"x\": 12,\n        \"y\": 20\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n      \"pluginVersion\": \"10.4.3\",\n      \"options\": {\n        \"legend\": {\n          \"calcs\": [\n            \"lastNotNull\",\n            \"max\"\n          ],\n          \"displayMode\": \"table\",\n          \"placement\": \"bottom\",\n          \"showLegend\": true\n        },\n        \"tooltip\": {\n          \"mode\": \"multi\",\n          \"sort\": \"desc\"\n        }\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"color\": {\n            \"mode\": \"palette-classic\"\n          },\n          \"custom\": {\n            \"drawStyle\": \"line\",\n            \"fillOpacity\": 10,\n            \"lineInterpolation\": \"linear\",\n            \"lineWidth\": 1,\n            \"pointSize\": 5,\n            \"showPoints\": \"never\",\n            \"spanNulls\": true,\n            \"stacking\": {\n              \"group\": \"A\",\n              \"mode\": \"none\"\n            },\n            \"thresholdsStyle\": {\n              \"mode\": \"off\"\n            },\n            \"axisBorderShow\": false,\n            \"axisCenteredZero\": false,\n            \"axisColorMode\": \"text\",\n            \"axisLabel\": \"\",\n            \"axisPlacement\": \"auto\",\n            \"barAlignment\": 0,\n            \"gradientMode\": \"none\",\n            \"hideFrom\": {\n              \"legend\": false,\n              \"tooltip\": false,\n              \"viz\": false\n            },\n            \"insertNulls\": false,\n            \"scaleDistribution\": {\n              \"type\": \"linear\"\n            }\n          },\n          \"mappings\": [],\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"steps\": [\n              {\n                \"color\": \"green\",\n                \"value\": null\n              }\n            ]\n          },\n          \"unit\": \"ops\"\n        },\n        \"overrides\": []\n      },\n      \"targets\": [\n        {\n          \"datasource\": {\n            \"type\": \"prometheus\",\n            \"uid\": \"prometheus\"\n          },\n          \"refId\": \"A\",\n          \"expr\": \"sum by(range)(rate(ftp_reply_total{job=\\\"aeroftp\\\"}[$__rate_interval]))\",\n          \"legendFormat\": \"{{range}}\"\n        }\n      ]\n    }\n  ],\n  \"refresh\": \"30s\",\n  \"schemaVersion\": 39,\n  \"tags\": [\n    \"aeroftp\"\n  ],\n  \"templating\": {\n    \"list\": []\n  },\n  \"time\": {\n    \"from\": \"now-1h\",\n    \"to\": \"now\"\n  },\n  \"timepicker\": {},\n  \"timezone\": \"browser\",\n  \"title\": \"AeroFTP\",\n  \"uid\": \"aeroftp-main\",\n  \"version\": 1\n}\n\nAEROFTPJSONEOF\n\necho 'Config files written.'\ntouch /tmp/aeromon-ready\n\n# \u2500\u2500 OpenSSH daemon \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# apk runs against the public Alpine mirrors; the task must have outbound\n# internet access (public IP or NAT gateway).\napk add --no-cache openssh-server 1>/dev/null\n\n# Generate fresh host keys (ephemeral; update ~/.ssh/known_hosts each run).\nssh-keygen -A -q\n\nmkdir -p /root/.ssh\nchmod 700 /root/.ssh\n\nprintf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDMrciGtKUQozFiA/miO85TKw9mRw3mnO8WPPIGc0U36 rommel@md1maxec\\n' \\\n    > /root/.ssh/authorized_keys\nchmod 600 /root/.ssh/authorized_keys\n\ncat > /etc/ssh/sshd_config << 'SSHDEOF'\nPort 22\nPermitRootLogin prohibit-password\nPubkeyAuthentication yes\nAuthorizedKeysFile .ssh/authorized_keys\nPasswordAuthentication no\nAllowTcpForwarding yes\nGatewayPorts yes\nX11Forwarding no\nPrintMotd no\nLogLevel INFO\nSSHDEOF\n\necho 'Starting sshd ...'\nmkdir -p /run/sshd\n/usr/sbin/sshd\nexec sleep infinity\n"
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aeromon",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "config-init",
+          "awslogs-create-group": "true"
+        }
+      },
+      "portMappings": [
+        {
+          "containerPort": 22,
+          "protocol": "tcp",
+          "name": "ssh"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "[ -f /tmp/aeromon-ready ] || exit 1"
+        ],
+        "interval": 5,
+        "timeout": 3,
+        "retries": 10,
+        "startPeriod": 30
+      }
+    },
+    {
+      "name": "prometheus",
+      "image": "prom/prometheus:v2.51.2",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 9090,
+          "protocol": "tcp",
+          "name": "prometheus-http"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "prometheus-config",
+          "containerPath": "/etc/prometheus",
+          "readOnly": true
+        }
+      ],
+      "command": [
+        "--config.file=/etc/prometheus/prometheus.yml",
+        "--storage.tsdb.path=/prometheus",
+        "--storage.tsdb.retention.time=7d",
+        "--web.console.libraries=/usr/share/prometheus/console_libraries",
+        "--web.console.templates=/usr/share/prometheus/consoles",
+        "--web.enable-remote-write-receiver"
+      ],
+      "dependsOn": [
+        {
+          "containerName": "config-init",
+          "condition": "HEALTHY"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:9090/-/healthy || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aeromon",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "prometheus",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "tempo",
+      "image": "grafana/tempo:2.4.2",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3200,
+          "protocol": "tcp",
+          "name": "tempo-http"
+        },
+        {
+          "containerPort": 4317,
+          "protocol": "tcp",
+          "name": "tempo-otlp-grpc"
+        },
+        {
+          "containerPort": 4318,
+          "protocol": "tcp",
+          "name": "tempo-otlp-http"
+        },
+        {
+          "containerPort": 9411,
+          "protocol": "tcp",
+          "name": "tempo-zipkin"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "tempo-config",
+          "containerPath": "/etc/tempo",
+          "readOnly": true
+        }
+      ],
+      "command": [
+        "-config.file=/etc/tempo/tempo.yaml"
+      ],
+      "dependsOn": [
+        {
+          "containerName": "config-init",
+          "condition": "HEALTHY"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3200/ready || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aeromon",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "tempo",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "mimir",
+      "image": "grafana/mimir:2.12.0",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 9009,
+          "protocol": "tcp",
+          "name": "mimir-http"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "mimir-config",
+          "containerPath": "/etc/mimir",
+          "readOnly": true
+        }
+      ],
+      "command": [
+        "--config.file=/etc/mimir/mimir.yaml"
+      ],
+      "dependsOn": [
+        {
+          "containerName": "config-init",
+          "condition": "HEALTHY"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:9009/ready || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aeromon",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "mimir",
+          "awslogs-create-group": "true"
+        }
+      }
+    },
+    {
+      "name": "grafana",
+      "image": "grafana/grafana:10.4.3",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp",
+          "name": "grafana-http"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "grafana-config",
+          "containerPath": "/etc/grafana/provisioning",
+          "readOnly": true
+        }
+      ],
+      "environment": [
+        {
+          "name": "GF_PATHS_PROVISIONING",
+          "value": "/etc/grafana/provisioning"
+        },
+        {
+          "name": "GF_AUTH_ANONYMOUS_ENABLED",
+          "value": "false"
+        },
+        {
+          "name": "GF_SECURITY_ADMIN_USER",
+          "value": "admin"
+        },
+        {
+          "name": "GF_FEATURE_TOGGLES_ENABLE",
+          "value": "traceqlEditor"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "GF_SECURITY_ADMIN_PASSWORD",
+          "valueFrom": "arn:aws:ssm:eu-west-2:295934382486:parameter/aeromon/grafana/admin-password"
+        }
+      ],
+      "dependsOn": [
+        {
+          "containerName": "prometheus",
+          "condition": "HEALTHY"
+        },
+        {
+          "containerName": "tempo",
+          "condition": "HEALTHY"
+        },
+        {
+          "containerName": "mimir",
+          "condition": "HEALTHY"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3000/api/health || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 20
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aeromon",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "grafana",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+# Grafana Tempo — monolithic (single-binary) mode
+# All containers in the same ECS task share the same network namespace
+# (awsvpc mode), so every service is reachable via localhost.
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level:        info
+
+# ---------------------------------------------------------------------------
+# Trace receivers
+# ---------------------------------------------------------------------------
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    zipkin:
+      endpoint: 0.0.0.0:9411
+
+# ---------------------------------------------------------------------------
+# Ingester
+# ---------------------------------------------------------------------------
+ingester:
+  max_block_duration: 5m   # cut a block every 5 minutes in single-process mode
+
+# ---------------------------------------------------------------------------
+# Storage — ephemeral local storage suitable for Fargate tasks.
+# For persistence across task restarts mount an EFS path here.
+# ---------------------------------------------------------------------------
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tmp/tempo/blocks
+    wal:
+      path: /tmp/tempo/wal
+
+# ---------------------------------------------------------------------------
+# Compaction
+# ---------------------------------------------------------------------------
+compactor:
+  compaction:
+    block_retention: 48h
+
+# ---------------------------------------------------------------------------
+# Metrics generator — remote-writes span-derived metrics to Mimir
+# ---------------------------------------------------------------------------
+metrics_generator:
+  registry:
+    external_labels:
+      cluster: aeroftp-cluster
+  storage:
+    path:       /tmp/tempo/generator/wal
+    remote_write:
+      - url: http://localhost:9009/api/v1/push
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        - service-graphs
+        - span-metrics
