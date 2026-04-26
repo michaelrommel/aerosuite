@@ -24,7 +24,14 @@
 		<div class="header">
 			<span class="pace">{pace}</span>
 			<span class="agent-id">{snapshot.agent_id}</span>
-			<span class="slice-badge">{snapshot.current_slice} / {dashboard.totalSlices}</span>
+			{#if dashboard.coachState === 'WAITING'}
+				<span class="ack-badge" class:acked={snapshot.plan_acked}
+					title={snapshot.plan_acked ? 'Plan confirmed' : 'Waiting for plan ack'}>
+					{snapshot.plan_acked ? '✓' : '…'}
+				</span>
+			{:else}
+				<span class="slice-badge">{snapshot.current_slice} / {dashboard.totalSlices}</span>
+			{/if}
 		</div>
 
 		<div class="meta">
@@ -94,6 +101,19 @@
 		font-size: 0.6rem;
 		color: var(--fg-dim);
 		white-space: nowrap;
+	}
+
+	.ack-badge {
+		font-size: 0.72rem;
+		font-weight: 800;
+		color: var(--fg-dim);
+		opacity: 0.45;
+		white-space: nowrap;
+		transition: color 0.2s, opacity 0.2s;
+	}
+	.ack-badge.acked {
+		color: var(--green-br);
+		opacity: 1;
 	}
 
 	.meta { display: flex; flex-direction: column; gap: 1px; }

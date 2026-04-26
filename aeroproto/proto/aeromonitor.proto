@@ -97,8 +97,14 @@ message AgentReport {
     oneof payload {
         SliceAck      slice_ack      = 3;  // Confirms agent has advanced to a slice.
         MetricsUpdate metrics_update = 4;  // Periodic status snapshot.
+        PlanAck       plan_ack       = 5;  // Acknowledges a PlanUpdate from the coach.
     }
 }
+
+// Sent by an agent after successfully applying a LoadPlanUpdate.
+// The coach tracks per-agent acks so the UI can show which agents
+// have the confirmed plan before the operator clicks Start.
+message PlanAck {}
 
 message SliceAck {
     uint32 slice_index = 1;
@@ -157,8 +163,9 @@ message LoadPlanUpdate {
     optional uint64               new_bandwidth_bps     = 3;
     optional FileSizeDistribution new_file_distribution = 4;
 
-    // Real agent count, broadcast once at test-start so agents can compute
+    // Real agent count, broadcast at plan-confirm time so agents can compute
     // their per-agent connection and bandwidth shares correctly.
+    // Also re-broadcast at test-start as a safety net for late-joining agents.
     optional uint32 new_total_agents = 5;
 }
 
@@ -198,6 +205,7 @@ message AgentSnapshot {
     uint32 error_count         = 8;
     string private_ip          = 9;  // Forwarded from RegisterRequest.
     string instance_id         = 10; // Forwarded from RegisterRequest.
+    bool   plan_acked           = 11; // True once the agent has sent a PlanAck.
 }
 
 message GlobalStats {

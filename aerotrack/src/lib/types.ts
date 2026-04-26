@@ -26,6 +26,8 @@ export interface AgentSnapshot {
 	error_count: number;
 	private_ip: string;
 	instance_id: string;
+	/** True once the agent has sent a PlanAck after the last Confirm. */
+	plan_acked: boolean;
 }
 
 export interface GlobalStats {

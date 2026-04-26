@@ -66,7 +66,7 @@
 		height: 100%;
 		width: 100%;
 		overflow: visible;
-		flex-shrink: 0;
+		flex-shrink: 1;
 	}
 
 	.slot {

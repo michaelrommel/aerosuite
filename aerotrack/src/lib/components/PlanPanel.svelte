@@ -88,7 +88,7 @@
 	const W = 600, H = 185;
 	// PAD.top expands in edit mode so the ▲/▼ nudge buttons above high segments
 	// stay inside the SVG viewBox and don't get clipped by the edit toolbar.
-	const PAD    = { right: 14, bottom: 4, left: 44 };
+	const PAD    = { right: 14, bottom: 4, left: 86 };
 	const IW     = W - PAD.left - PAD.right;
 	const padTop = $derived(plan.isEditing ? 46 : 16);
 	const IH     = $derived(H - padTop - PAD.bottom);
@@ -113,6 +113,20 @@
 		: displayPlan.total_bandwidth_bps === 0 ? 'Unlimited'
 		: formatBandwidth(displayPlan.total_bandwidth_bps)
 	);
+
+	// ── Bucket bar ─────────────────────────────────────────────────────────────
+	// Drawn in the left-padding strip (x 2..14) that sits left of the Y labels.
+	const BUCKET_COLORS = ['#427b58', '#b57614', '#9d0006', '#8f3f71', '#076678'];
+	const barX = 2, barW = 50;
+
+	function formatBucketSize(bytes: number): string {
+		if (bytes >= 1_073_741_824) return `${Math.round(bytes / 1_073_741_824)}GB`;
+		if (bytes >= 1_048_576)     return `${Math.round(bytes / 1_048_576)}MB`;
+		if (bytes >= 1_024)         return `${Math.round(bytes / 1_024)}KB`;
+		return `${bytes}B`;
+	}
+
+	const buckets = $derived(displayPlan?.file_distribution?.buckets ?? []);
 
 	// xFor(i) = x coordinate of the LEFT EDGE of slice i.
 	// xFor(slices.length) = right edge of the graph.
@@ -265,6 +279,32 @@
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div class="svg-wrapper" role="img" aria-label="load plan timeline" onmouseleave={clearTooltip}>
 			<svg viewBox="0 0 {W} {H}" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">
+
+				<!-- Bucket distribution bar (left-padding strip, x=2..14) -->
+				{#if buckets.length > 0}
+					{#each buckets as b, i}
+						{@const cumFrac = buckets.slice(0, i).reduce((s, bb) => s + bb.percentage, 0)}
+						{@const segY    = padTop + cumFrac * IH}
+						{@const segH    = b.percentage * IH}
+						{@const cx      = barX + barW / 2}
+						{@const cy      = segY + segH / 2}
+						<rect
+							x={barX} y={segY}
+							width={barW} height={Math.max(segH, 0)}
+							fill={BUCKET_COLORS[i % BUCKET_COLORS.length]} />
+						{#if segH >= 14}
+							<text
+								x={cx} y={cy}
+								font-size="12" fill="#ebdbb2"
+								text-anchor="middle" dominant-baseline="central"
+								font-family="monospace"
+							>{formatBucketSize(b.size_max_bytes)}</text>
+						{/if}
+					{/each}
+					<!-- Outline -->
+					<rect x={barX} y={padTop} width={barW} height={IH}
+						fill="none" stroke="#504945" stroke-width="0.5" />
+				{/if}
 
 				<!-- Horizontal grid lines + Y labels -->
 				{#each yFracs as frac}

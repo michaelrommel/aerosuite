@@ -37,7 +37,7 @@
 	/* Top third */
 	.top-band {
 		display: flex;
-		flex: 0 0 33vh;
+		flex: 0 0 max(33vh, 350px);
 		min-height: 0;
 		overflow: hidden;
 	}
