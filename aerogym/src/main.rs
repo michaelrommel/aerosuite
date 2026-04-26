@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
             agent_index  = reg.agent_index,
             total_agents = plan.total_agents(),
             total_slices = plan.total_slices(),
-            my_bw_bps    = plan.my_bandwidth_bps(),
+            my_bw_bps    = plan.my_bandwidth_bps(0),
             "plan received"
         );
 

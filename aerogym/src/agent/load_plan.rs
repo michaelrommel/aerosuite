@@ -9,6 +9,39 @@ use tracing::warn;
 
 use super::rate_limit::RateLimiterConfig;
 
+// ── Rotation constants ────────────────────────────────────────────────────────
+//
+// These are the single source of truth for the keepalived-drain rotation.
+// session.rs imports and uses them directly; aerotrack mirrors the same
+// values in its TypeScript store.
+
+/// Minimum fleet size before rotation-based keepalived drain activates.
+/// Below this threshold every agent stays permanently active.
+pub(crate) const DRAIN_FLEET_THRESHOLD: u32 = 25;
+
+/// Total rotation groups (each group = 1/ROTATION_GROUPS of the fleet,
+/// i.e. 5% per group with the default of 20).
+pub(crate) const ROTATION_GROUPS: u32 = 20;
+
+/// Groups active at any one time (12/20 = 60% of the fleet).
+/// The remaining 8 groups are in cooldown; each agent is active for
+/// ACTIVE_GROUPS slices then rests for ROTATION_GROUPS − ACTIVE_GROUPS
+/// slices before returning.
+pub(crate) const ACTIVE_GROUPS: u32 = 12;
+
+/// Returns `true` if the agent with `agent_index` should be running FTP
+/// transfers during `slice_index`.
+///
+/// Below [`DRAIN_FLEET_THRESHOLD`] all agents are permanently active.
+pub(crate) fn agent_is_active(agent_index: u32, slice_index: u32, total_agents: u32) -> bool {
+    if total_agents < DRAIN_FLEET_THRESHOLD {
+        return true;
+    }
+    let group = agent_index % ROTATION_GROUPS;
+    let s_mod  = slice_index % ROTATION_GROUPS;
+    (group + ROTATION_GROUPS - s_mod) % ROTATION_GROUPS < ACTIVE_GROUPS
+}
+
 /// Agent-local view of the load plan received from aerocoach.
 #[derive(Debug, Clone)]
 pub struct AgentPlan {
@@ -43,8 +76,34 @@ impl AgentPlan {
 
     // ── Per-agent share ───────────────────────────────────────────────────
 
+    /// Number of agents running transfers during `slice_index`.
+    /// Equal to `total_agents` when the fleet is below the rotation threshold.
+    pub fn active_agents_count(&self, slice_index: u32) -> u32 {
+        let total = self.total_agents();
+        if total < DRAIN_FLEET_THRESHOLD {
+            return total;
+        }
+        (0..total)
+            .filter(|&idx| agent_is_active(idx, slice_index, total))
+            .count() as u32
+    }
+
+    /// This agent's rank (0-based) among active agents for `slice_index`.
+    /// Used to distribute the remainder evenly across the active subset.
+    fn my_active_rank(&self, slice_index: u32) -> u32 {
+        let total = self.total_agents();
+        if total < DRAIN_FLEET_THRESHOLD {
+            return self.agent_index;
+        }
+        (0..self.agent_index)
+            .filter(|&idx| agent_is_active(idx, slice_index, total))
+            .count() as u32
+    }
+
     /// Number of concurrent connections *this* agent should be running during
-    /// `slice_index`.  Returns 0 if the slice is not found in the plan.
+    /// `slice_index`.  Divides `total_connections` among the *active* agents
+    /// only, so cooldown agents' unused slots are redistributed rather than
+    /// lost.  Returns 0 if the slice is not found in the plan.
     pub fn my_connections_for_slice(&self, slice_index: u32) -> u32 {
         let total = self
             .proto
@@ -53,41 +112,22 @@ impl AgentPlan {
             .find(|s| s.slice_index == slice_index)
             .map(|s| s.total_connections)
             .unwrap_or(0);
-        per_agent_connections(total, self.agent_index, self.total_agents())
+        let active_count = self.active_agents_count(slice_index);
+        let active_rank  = self.my_active_rank(slice_index);
+        per_agent_connections(total, active_rank, active_count)
     }
 
-    /// Bandwidth ceiling for this agent in bytes per second.
-    pub fn my_bandwidth_bps(&self) -> u64 {
+    /// Bandwidth ceiling for this agent in bytes per second at `slice_index`.
+    /// Divides the total budget among *active* agents only, so aggregate
+    /// throughput always matches the configured total regardless of how many
+    /// agents are in cooldown.
+    pub fn my_bandwidth_bps(&self, slice_index: u32) -> u64 {
         let total = self.proto.total_bandwidth_bps;
         if total == 0 {
             return 0;
         }
-        total / self.total_agents() as u64
-    }
-
-    /// Build a [`RateLimiterConfig`] for this agent's bandwidth share.
-    /// Returns `None` when no bandwidth limit is configured (unlimited).
-    #[allow(dead_code)]
-    pub fn my_rate_config(&self) -> Option<RateLimiterConfig> {
-        let bps = self.my_bandwidth_bps();
-        if bps == 0 {
-            return None;
-        }
-        RateLimiterConfig::from_bps(bps)
-    }
-
-    /// Per-transfer rate when `n` transfers are running concurrently.
-    ///
-    /// This is the *ideal* rate used as a floor when carry-over transfers
-    /// have already consumed most of the agent's bandwidth budget.
-    /// Returns `None` when bandwidth is unlimited or `n` is zero.
-    #[allow(dead_code)]
-    pub fn rate_per_transfer(&self, n: u32) -> Option<RateLimiterConfig> {
-        let agent_bps = self.my_bandwidth_bps();
-        if agent_bps == 0 || n == 0 {
-            return None;
-        }
-        RateLimiterConfig::from_bps(agent_bps / n as u64)
+        let active_count = self.active_agents_count(slice_index).max(1);
+        total / active_count as u64
     }
 
     // ── File distribution ─────────────────────────────────────────────────
@@ -245,7 +285,7 @@ mod tests {
         // plan has 10 MB/s, 4 agents → 2.5 MB/s each
         let mut p = make_plan(0, 4);
         p.proto.total_bandwidth_bps = 10_000_000;
-        assert_eq!(p.my_bandwidth_bps(), 2_500_000);
+        assert_eq!(p.my_bandwidth_bps(0), 2_500_000);
     }
 
     #[test]
@@ -272,7 +312,7 @@ mod tests {
             new_file_distribution: None,
             new_total_agents: None,
         });
-        assert_eq!(p.my_bandwidth_bps(), 50_000_000);
+        assert_eq!(p.my_bandwidth_bps(0), 50_000_000);
     }
 
     #[test]

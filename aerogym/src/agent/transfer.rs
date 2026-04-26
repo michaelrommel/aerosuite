@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_stream::stream;
 use governor::{Quota, RateLimiter};
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, Socket, SockRef, Type};
 use suppaftp::{tokio::AsyncFtpStream, types::Mode};
 use tokio::{fs::File, net::TcpStream};
 use tokio_stream::StreamExt;
@@ -225,9 +225,21 @@ async fn ftp_upload(
     bytes_sent:  Arc<AtomicU64>,
 ) -> Result<u64> {
     // ── Connect & authenticate ────────────────────────────────────────────
-    let mut ftp = AsyncFtpStream::connect(ftp_target)
+    //
+    // We connect the control channel manually so we can set SO_LINGER=0 before
+    // handing the socket to suppaftp.  With l_linger=0 the OS sends an
+    // immediate RST when the socket is dropped (instead of going through the
+    // FIN → TIME_WAIT cycle), which keepalived interprets as a definitive
+    // connection close and uses to expire its IP-persistence entry promptly.
+    let tcp = TcpStream::connect(ftp_target)
         .await
         .with_context(|| format!("FTP connect to {ftp_target:?} failed"))?;
+    SockRef::from(&tcp)
+        .set_linger(Some(Duration::ZERO))
+        .context("failed to set SO_LINGER=0 on FTP control connection")?;
+    let mut ftp = AsyncFtpStream::connect_with_stream(tcp)
+        .await
+        .with_context(|| format!("FTP handshake with {ftp_target:?} failed"))?;
     ftp.set_mode(Mode::ExtendedPassive);
     ftp.login(ftp_user, ftp_pass)
         .await
@@ -240,6 +252,16 @@ async fn ftp_upload(
         .with_context(|| format!("cannot open {}", local_file.display()))?;
 
     // ── Upload (rate-limited or unlimited) ────────────────────────────────
+    //
+    // Always install a custom passive-mode stream builder so every data
+    // connection inherits the same SO_LINGER=0 treatment as the control
+    // channel above.  MSS customisation (when configured) is handled by the
+    // same builder, collapsing what was previously three separate code paths.
+    let mss = rate_config.as_ref().map_or(0, |cfg| cfg.mss);
+    ftp = ftp.passive_stream_builder(move |addr: SocketAddr| {
+        Box::pin(async move { make_tcp_stream(addr, mss).await }) as TcpStreamFuture
+    });
+
     let bytes_written = match rate_config {
         // ── Unlimited ─────────────────────────────────────────────────────
         None => {
@@ -252,13 +274,6 @@ async fn ftp_upload(
 
         // ── Rate-limited ──────────────────────────────────────────────────
         Some(cfg) => {
-            // Optionally install a custom TCP socket builder for MSS control.
-            if cfg.mss > 0 {
-                let mss = cfg.mss;
-                ftp = ftp.passive_stream_builder(move |addr: SocketAddr| {
-                    Box::pin(async move { make_tcp_stream(addr, mss).await }) as TcpStreamFuture
-                });
-            }
 
             let mut data_stream = ftp
                 .put_with_stream(filename)

@@ -21,29 +21,29 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use aeroproto::aeromonitor::{
-    agent_report, coach_command, AgentReport, CoachCommand, MetricsUpdate, PlanAck, SliceAck,
-    agent_service_client::AgentServiceClient,
+    AgentReport, CoachCommand, MetricsUpdate, PlanAck, SliceAck, agent_report,
+    agent_service_client::AgentServiceClient, coach_command,
 };
 
 use super::{
     config::Config,
-    load_plan::{make_transfer_filename, AgentPlan},
+    load_plan::{AgentPlan, ROTATION_GROUPS, agent_is_active, make_transfer_filename},
     metrics::MetricsAccumulator,
     rate_limit::RateLimiterConfig,
-    transfer::{run_transfer, TransferOutcome},
+    transfer::{TransferOutcome, run_transfer},
 };
 
 /// Report channel buffer: large enough to avoid back-pressure during
@@ -62,30 +62,14 @@ const METRICS_HEARTBEAT: Duration = Duration::from_secs(3);
 /// and (b) synthesise an error [`TransferOutcome`] for any task that is
 /// aborted by the graceful-drain timeout at shutdown.
 struct InFlightInfo {
-    filename:        String,
-    bucket_id:       String,
-    time_slice:      u32,
-    start_ms:        i64,
+    filename: String,
+    bucket_id: String,
+    time_slice: u32,
+    start_ms: i64,
     file_size_bytes: u64,
     /// Atomically updated by the transfer task as chunks leave the buffer.
-    bytes_sent:      Arc<AtomicU64>,
+    bytes_sent: Arc<AtomicU64>,
 }
-
-/// Minimum number of agents in the fleet before the keepalived drain
-/// feature activates.  Below this threshold the feature is a no-op.
-const DRAIN_FLEET_THRESHOLD: u32 = 25;
-
-/// Per-slice probability (0.0–1.0) of triggering a keepalived drain when
-/// the fleet is large enough.  At 0.10 with 20+ agents: on any given slice
-/// roughly 2 agents will drain, which is enough to rotate backend stickiness
-/// without meaningfully reducing aggregate throughput.
-const DRAIN_PROBABILITY: f64 = 0.10;
-
-/// Minimum drain duration in milliseconds, regardless of slice length.
-/// Must exceed the keepalived persistence timeout configured on the server
-/// (currently 3 s) by a comfortable margin so the persistence entry is
-/// guaranteed to have expired before fresh connections are opened.
-const DRAIN_MIN_MS: u64 = 4_000;
 
 /// Open the `Session` stream and run the slice loop until the test ends.
 pub async fn run(
@@ -137,7 +121,7 @@ pub async fn run(
 
     // ── Slice execution loop ──────────────────────────────────────────────
     let mut active_tasks: JoinSet<TransferOutcome> = JoinSet::new();
-    let mut metrics     = MetricsAccumulator::new();
+    let mut metrics = MetricsAccumulator::new();
     let mut conn_id: u64 = 0;
     // conn_id → per-transfer in-flight state (byte counter + metadata).
     let mut in_flight: HashMap<u64, InFlightInfo> = HashMap::new();
@@ -148,8 +132,12 @@ pub async fn run(
     let mut current_slice: u32 = 0;
     // Monotonic instant when the current slice started and the connection
     // target for that slice — used by the refill logic.
-    let mut slice_start  = tokio::time::Instant::now();
+    let mut slice_start = tokio::time::Instant::now();
     let mut slice_target: u32 = 0;
+    // Whether this agent is currently in the active window of the rotation.
+    // Initialised to `true`; updated at every SliceTick once the fleet is
+    // large enough for the rotation to kick in.
+    let mut agent_active = true;
 
     // Periodic heartbeat: sends a MetricsUpdate even when no transfer
     // completes, so aerocoach always has fresh active_connections and
@@ -181,54 +169,90 @@ pub async fn run(
                                 current_slice = tick.slice_index;
                                 slice_start   = tokio::time::Instant::now();
 
-                                // ── Keepalived drain (large-fleet only) ───────────────────
+                                // ── Rotation-based keepalived drain ──────────────────────
                                 //
-                                // keepalived's persistence table maps each client IP to a
-                                // backend for `persistence_timeout` seconds.  Because aerogym
-                                // agents never stop transferring, that timer never expires and
-                                // newly added backends never receive traffic.
-                                //
-                                // Fix: at slice boundaries, probabilistically abort ALL
-                                // in-flight transfers (including carry-overs from the previous
-                                // slice).  Dropping `AsyncFtpStream` closes the underlying TCP
-                                // connections, which is what keepalived watches.  After sleeping
-                                // longer than the persistence timeout, fresh connections from
-                                // `handle_slice_tick` will be routed to any available backend.
-                                if plan.total_agents() > DRAIN_FLEET_THRESHOLD
-                                    && rand::random::<f64>() < DRAIN_PROBABILITY
-                                {
-                                    let drain_ms = (plan.slice_duration_ms() / 2).max(DRAIN_MIN_MS);
-                                    let aborted  = active_tasks.len();
+                                // The fleet is split into ROTATION_GROUPS groups.  At each
+                                // slice ACTIVE_GROUPS (60%) run transfers; the remaining 40%
+                                // are in cooldown.  On the active→cooldown transition all FTP
+                                // connections are aborted.  Because every socket is created
+                                // with SO_LINGER=0 (set in transfer.rs) the OS sends RST
+                                // immediately, giving keepalived the clearest possible signal
+                                // to expire its per-IP persistence entry.  The cooldown window
+                                // itself (8 slices × 30–60 s = 240–480 s) is orders of
+                                // magnitude longer than any typical persistence timeout, so no
+                                // additional sleep is needed.
+                                let now_active = agent_is_active(
+                                    plan.agent_index,
+                                    tick.slice_index,
+                                    plan.total_agents(),
+                                );
+
+                                if agent_active && !now_active {
+                                    // active → cooldown: abort all in-flight transfers.
+                                    let aborted = active_tasks.len();
                                     info!(
-                                        slice    = tick.slice_index,
+                                        slice = tick.slice_index,
+                                        group = plan.agent_index % ROTATION_GROUPS,
                                         aborted,
-                                        drain_ms,
-                                        "keepalived drain: aborting all transfers"
+                                        "rotation: entering cooldown, aborting in-flight transfers"
                                     );
-                                    // abort_all() cancels each task at its next .await,
-                                    // which drops the AsyncFtpStream and closes the TCP socket.
                                     active_tasks.abort_all();
                                     while active_tasks.join_next().await.is_some() {}
                                     in_flight.clear();
                                     running_rates.clear();
-                                    tokio::time::sleep(Duration::from_millis(drain_ms)).await;
-                                    info!(slice = tick.slice_index, "keepalived drain complete");
+                                    slice_target = 0;
+                                } else if !agent_active && now_active {
+                                    info!(
+                                        slice = tick.slice_index,
+                                        group = plan.agent_index % ROTATION_GROUPS,
+                                        "rotation: exiting cooldown, resuming transfers"
+                                    );
                                 }
 
-                                handle_slice_tick(
-                                    tick.slice_index,
-                                    config,
-                                    plan,
-                                    bucket_files,
-                                    &mut active_tasks,
-                                    &mut metrics,
-                                    &mut conn_id,
-                                    &report_tx,
-                                    &mut running_rates,
-                                    &mut in_flight,
-                                    &mut slice_target,
-                                )
-                                .await?;
+                                agent_active = now_active;
+
+                                if agent_active {
+                                    handle_slice_tick(
+                                        tick.slice_index,
+                                        config,
+                                        plan,
+                                        bucket_files,
+                                        &mut active_tasks,
+                                        &mut metrics,
+                                        &mut conn_id,
+                                        &report_tx,
+                                        &mut running_rates,
+                                        &mut in_flight,
+                                        &mut slice_target,
+                                    )
+                                    .await?;
+                                } else {
+                                    // Cooldown: still acknowledge the tick and flush any
+                                    // accumulated metrics so aerocoach sees
+                                    // active_connections = 0 for this agent.  The periodic
+                                    // metrics_tick heartbeat keeps the card updated for the
+                                    // rest of the cooldown window without any extra work here.
+                                    report_tx
+                                        .send(make_ack_report(
+                                            &config.agent_id,
+                                            tick.slice_index,
+                                        ))
+                                        .await
+                                        .context("failed to send SliceAck (cooldown)")?;
+                                    if let Some(update) = metrics
+                                        .drain_into_update(tick.slice_index, 0, 0, false)
+                                    {
+                                        report_tx
+                                            .send(make_metrics_report(
+                                                &config.agent_id,
+                                                update,
+                                            ))
+                                            .await
+                                            .context(
+                                                "failed to send MetricsUpdate (cooldown)",
+                                            )?;
+                                    }
+                                }
                             }
 
                             Some(coach_command::Payload::PlanUpdate(update)) => {
@@ -242,7 +266,7 @@ pub async fn run(
                                 plan.apply_update(update);
                                 info!(
                                     effective_total_agents = plan.total_agents(),
-                                    my_bandwidth_bps       = plan.my_bandwidth_bps(),
+                                    my_bandwidth_bps       = plan.my_bandwidth_bps(current_slice),
                                     "plan state after update"
                                 );
                                 report_tx
@@ -301,7 +325,7 @@ pub async fn run(
 
                         if elapsed_ms < window_ms && running < slice_target {
                             let bucket_id = outcome.bucket_id.clone();
-                            let agent_bps = plan.my_bandwidth_bps();
+                            let agent_bps = plan.my_bandwidth_bps(current_slice);
                             let carry_bps: u64 = running_rates.values().sum();
                             // Rate for the replacement: freed bandwidth slot,
                             // floored at the ideal per-transfer share.
@@ -393,16 +417,16 @@ pub async fn run(
 // ── Slice tick handler ────────────────────────────────────────────────────
 
 async fn handle_slice_tick(
-    slice_index:  u32,
-    config:       &Config,
-    plan:         &AgentPlan,
+    slice_index: u32,
+    config: &Config,
+    plan: &AgentPlan,
     bucket_files: &HashMap<String, PathBuf>,
     active_tasks: &mut JoinSet<TransferOutcome>,
-    metrics:      &mut MetricsAccumulator,
-    conn_id:      &mut u64,
-    report_tx:    &mpsc::Sender<AgentReport>,
+    metrics: &mut MetricsAccumulator,
+    conn_id: &mut u64,
+    report_tx: &mpsc::Sender<AgentReport>,
     running_rates: &mut HashMap<u64, u64>,
-    in_flight:    &mut HashMap<u64, InFlightInfo>,
+    in_flight: &mut HashMap<u64, InFlightInfo>,
     // Written with the target connection count for this slice so the
     // refill logic in the completion handler can consult it.
     slice_target: &mut u32,
@@ -412,8 +436,8 @@ async fn handle_slice_tick(
     let running = active_tasks.len() as u32;
 
     info!(
-        slice   = slice_index,
-        target  = my_target,
+        slice = slice_index,
+        target = my_target,
         running,
         "slice tick"
     );
@@ -438,8 +462,8 @@ async fn handle_slice_tick(
 
     // ── 3. Ramp up new transfers if target > currently running ────────────
     if my_target > running {
-        let to_start  = my_target - running;
-        let agent_bps = plan.my_bandwidth_bps();
+        let to_start = my_target - running;
+        let agent_bps = plan.my_bandwidth_bps(slice_index);
 
         // Bandwidth already committed to carry-over transfers from previous
         // slices.  Each entry was recorded when the transfer was spawned.
@@ -456,7 +480,11 @@ async fn handle_slice_tick(
         // When carry-overs have exhausted the budget (available == 0) we fall
         // back to the ideal rate.  This causes a temporary over-allocation
         // that resolves naturally as carry-overs complete.
-        let ideal_bps = if my_target > 0 { agent_bps / my_target as u64 } else { 0 };
+        let ideal_bps = if my_target > 0 {
+            agent_bps / my_target as u64
+        } else {
+            0
+        };
         let per_new_bps = if available_bps > 0 && to_start > 0 {
             available_bps / to_start as u64
         } else {
@@ -476,13 +504,13 @@ async fn handle_slice_tick(
             };
 
             *conn_id += 1;
-            let cid      = *conn_id;
+            let cid = *conn_id;
             let filename = make_transfer_filename(&config.agent_id, slice_index, cid);
 
             let ftp_target = config.ftp_target.clone();
-            let ftp_user   = config.ftp_user.clone();
-            let ftp_pass   = config.ftp_pass.clone();
-            let bucket_id  = bucket.bucket_id.clone();
+            let ftp_user = config.ftp_user.clone();
+            let ftp_pass = config.ftp_pass.clone();
+            let bucket_id = bucket.bucket_id.clone();
 
             // Record the allocation and in-flight metadata before spawning
             // so both maps are always consistent with what's running.
@@ -493,14 +521,17 @@ async fn handle_slice_tick(
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0);
-            in_flight.insert(cid, InFlightInfo {
-                filename:        filename.clone(),
-                bucket_id:       bucket_id.clone(),
-                time_slice:      slice_index,
-                start_ms:        now_ms(),
-                file_size_bytes,
-                bytes_sent:      bytes_sent.clone(),
-            });
+            in_flight.insert(
+                cid,
+                InFlightInfo {
+                    filename: filename.clone(),
+                    bucket_id: bucket_id.clone(),
+                    time_slice: slice_index,
+                    start_ms: now_ms(),
+                    file_size_bytes,
+                    bytes_sent: bytes_sent.clone(),
+                },
+            );
 
             active_tasks.spawn(run_transfer(
                 cid,
@@ -517,11 +548,11 @@ async fn handle_slice_tick(
         }
 
         info!(
-            slice        = slice_index,
-            started      = to_start,
-            total        = active_tasks.len(),
+            slice = slice_index,
+            started = to_start,
+            total = active_tasks.len(),
             per_new_bps,
-            carry_bps    = carry_over_bps,
+            carry_bps = carry_over_bps,
             available_bps,
             "ramped up transfers"
         );
@@ -577,8 +608,8 @@ async fn shutdown(
         // outcomes are intentionally not reported.
         let snapshot_ms = now_ms();
         for (&conn_id, info) in &in_flight {
-            let bytes       = info.bytes_sent.load(Ordering::Relaxed);
-            let elapsed_ms  = (snapshot_ms - info.start_ms).max(1) as u64;
+            let bytes = info.bytes_sent.load(Ordering::Relaxed);
+            let elapsed_ms = (snapshot_ms - info.start_ms).max(1) as u64;
             let bandwidth_kibps = if bytes > 0 {
                 ((bytes / 1024) * 1000 / elapsed_ms) as u32
             } else {
@@ -586,19 +617,18 @@ async fn shutdown(
             };
             metrics.record(TransferOutcome {
                 conn_id,
-                filename:          info.filename.clone(),
-                bucket_id:         info.bucket_id.clone(),
+                filename: info.filename.clone(),
+                bucket_id: info.bucket_id.clone(),
                 bytes_transferred: bytes,
-                file_size_bytes:   info.file_size_bytes,
+                file_size_bytes: info.file_size_bytes,
                 bandwidth_kibps,
-                success:           false,
-                error_reason:      Some(
-                    "in-flight: transfer was still running when the test ended"
-                        .into(),
+                success: false,
+                error_reason: Some(
+                    "in-flight: transfer was still running when the test ended".into(),
                 ),
                 start_time_ms: info.start_ms,
-                end_time_ms:   snapshot_ms,
-                time_slice:    info.time_slice,
+                end_time_ms: snapshot_ms,
+                time_slice: info.time_slice,
             });
         }
         info!(
@@ -609,10 +639,7 @@ async fn shutdown(
         // this agent has finished reporting.  force = true so we always send
         // the message, even when in_flight was empty (no transfers at shutdown).
         if let Some(update) = metrics.drain_into_update(0, 0, 0, true) {
-            if let Err(e) = report_tx
-                .send(make_metrics_report(agent_id, update))
-                .await
-            {
+            if let Err(e) = report_tx.send(make_metrics_report(agent_id, update)).await {
                 warn!(error = %e, "failed to send in-flight snapshot");
             }
         }
@@ -720,25 +747,23 @@ async fn shutdown(
         };
         metrics.record(TransferOutcome {
             conn_id,
-            filename:          info.filename,
-            bucket_id:         info.bucket_id,
+            filename: info.filename,
+            bucket_id: info.bucket_id,
             bytes_transferred: bytes,
-            file_size_bytes:   info.file_size_bytes,
+            file_size_bytes: info.file_size_bytes,
             bandwidth_kibps,
-            success:           false,
-            error_reason:      Some("transfer aborted: test ended before completion".into()),
-            start_time_ms:     info.start_ms,
-            end_time_ms:       abort_end_ms,
-            time_slice:        info.time_slice,
+            success: false,
+            error_reason: Some("transfer aborted: test ended before completion".into()),
+            start_time_ms: info.start_ms,
+            end_time_ms: abort_end_ms,
+            time_slice: info.time_slice,
         });
     }
 
     // Send the final flush (force=true so the message is always sent even
     // when there were no in-flight transfers at abort time).
     if let Some(update) = metrics.drain_into_update(0, 0, 0, true) {
-        let _ = report_tx
-            .send(make_metrics_report(agent_id, update))
-            .await;
+        let _ = report_tx.send(make_metrics_report(agent_id, update)).await;
     }
 
     // Drop the sender to close the gRPC stream.
@@ -754,9 +779,9 @@ async fn shutdown(
 
 fn make_plan_ack_report(agent_id: &str) -> AgentReport {
     AgentReport {
-        agent_id:    agent_id.to_string(),
+        agent_id: agent_id.to_string(),
         timestamp_ms: now_ms(),
-        payload:     Some(agent_report::Payload::PlanAck(PlanAck {})),
+        payload: Some(agent_report::Payload::PlanAck(PlanAck {})),
     }
 }
 
@@ -784,20 +809,104 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::agent::load_plan::{ACTIVE_GROUPS, DRAIN_FLEET_THRESHOLD, ROTATION_GROUPS, agent_is_active};
+
+    // ── agent_is_active rotation tests ───────────────────────────────────────
+
+    /// Below the fleet threshold every agent is always active.
+    #[test]
+    fn rotation_disabled_for_small_fleets() {
+        for agent in 0..DRAIN_FLEET_THRESHOLD {
+            for slice in 0..40 {
+                assert!(
+                    agent_is_active(agent, slice, DRAIN_FLEET_THRESHOLD - 1),
+                    "agent {agent} slice {slice} should be active in small fleet"
+                );
+            }
+        }
+    }
+
+    /// Exactly ACTIVE_GROUPS out of ROTATION_GROUPS agents are active per slice.
+    #[test]
+    fn rotation_active_count_per_slice() {
+        let total = DRAIN_FLEET_THRESHOLD;
+        // One agent per group (groups 0..ROTATION_GROUPS).
+        for slice in 0..ROTATION_GROUPS {
+            let active_count = (0..ROTATION_GROUPS)
+                .filter(|&a| agent_is_active(a, slice, total))
+                .count() as u32;
+            assert_eq!(
+                active_count, ACTIVE_GROUPS,
+                "slice {slice}: expected {ACTIVE_GROUPS} active groups, got {active_count}"
+            );
+        }
+    }
+
+    /// The active window advances by exactly one group per slice: the newest
+    /// group entering the window is `S mod ROTATION_GROUPS`, and one group
+    /// retires at the other end.
+    #[test]
+    fn rotation_window_advances_by_one_per_slice() {
+        let total    = DRAIN_FLEET_THRESHOLD;
+        let cooldown = (ROTATION_GROUPS - ACTIVE_GROUPS) as usize; // 8
+
+        // Group 0:
+        //   - active at slice 0 (top of first window)
+        //   - cooldown at slices 1..=8 (8 slices)
+        //   - active again at slice 9  (bottom of next window)
+        assert!(agent_is_active(0, 0, total), "group 0 active at slice 0");
+        for s in 1..=(cooldown as u32) {
+            assert!(!agent_is_active(0, s, total),
+                "group 0 should be in cooldown at slice {s}");
+        }
+        assert!(
+            agent_is_active(0, cooldown as u32 + 1, total),
+            "group 0 active again at slice {} after cooldown", cooldown + 1
+        );
+
+        // The rotation period is exactly ROTATION_GROUPS slices for every group.
+        for g in 0..ROTATION_GROUPS {
+            let state_now  = agent_is_active(g, 0, total);
+            let state_next = agent_is_active(g, ROTATION_GROUPS, total);
+            assert_eq!(state_now, state_next,
+                "group {g}: state should repeat every {ROTATION_GROUPS} slices");
+        }
+    }
+
+    /// Each group is active for ACTIVE_GROUPS slices then rests for
+    /// ROTATION_GROUPS - ACTIVE_GROUPS slices within one full cycle.
+    #[test]
+    fn rotation_each_group_active_and_cooldown_duration() {
+        let total = DRAIN_FLEET_THRESHOLD;
+        let cooldown_len = ROTATION_GROUPS - ACTIVE_GROUPS;
+        for group in 0..ROTATION_GROUPS {
+            let active: Vec<u32> = (0..ROTATION_GROUPS)
+                .filter(|&s| agent_is_active(group, s, total))
+                .collect();
+            let resting: Vec<u32> = (0..ROTATION_GROUPS)
+                .filter(|&s| !agent_is_active(group, s, total))
+                .collect();
+            assert_eq!(active.len() as u32, ACTIVE_GROUPS,
+                "group {group}: expected {ACTIVE_GROUPS} active slices");
+            assert_eq!(resting.len() as u32, cooldown_len,
+                "group {group}: expected {cooldown_len} cooldown slices");
+        }
+    }
 
     use tokio::net::TcpListener;
-    use tokio::sync::{mpsc, Notify};
-    use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+    use tokio::sync::{Notify, mpsc};
+    use tokio_stream::{StreamExt, wrappers::ReceiverStream};
     use tokio_util::sync::CancellationToken;
     use tonic::{Request, Response, Status, Streaming};
 
     use aeroproto::aeromonitor::{
-        agent_report, coach_command,
+        AgentReport, CoachCommand, FileSizeBucket, FileSizeDistribution, LoadPlan, RegisterRequest,
+        RegisterResponse, ShutdownCmd, SliceTick, TimeSlice, agent_report,
         agent_service_server::{AgentService, AgentServiceServer},
-        AgentReport, CoachCommand, FileSizeDistribution, FileSizeBucket,
-        LoadPlan, RegisterRequest, RegisterResponse, ShutdownCmd, SliceTick, TimeSlice,
+        coach_command,
     };
 
     use super::super::{config::Config, file_manager, load_plan::AgentPlan, registration};
@@ -807,13 +916,13 @@ mod tests {
 
     /// Configures the mock coach's scripted behaviour.
     struct MockCoach {
-        plan:             LoadPlan,
+        plan: LoadPlan,
         /// Connections expected in slice 0 (mock waits for all to complete).
         expect_transfers: usize,
         /// Notified when the mock has received everything it expected.
-        done:             Arc<Notify>,
+        done: Arc<Notify>,
         /// Counts successfully-completed transfers seen by the mock.
-        success_count:    Arc<AtomicUsize>,
+        success_count: Arc<AtomicUsize>,
     }
 
     type MockStream = ReceiverStream<Result<CoachCommand, Status>>;
@@ -825,10 +934,10 @@ mod tests {
             _req: Request<RegisterRequest>,
         ) -> Result<Response<RegisterResponse>, Status> {
             Ok(Response::new(RegisterResponse {
-                accepted:      true,
+                accepted: true,
                 reject_reason: String::new(),
-                agent_index:   0,
-                load_plan:     Some(self.plan.clone()),
+                agent_index: 0,
+                load_plan: Some(self.plan.clone()),
             }))
         }
 
@@ -839,21 +948,24 @@ mod tests {
             request: Request<Streaming<AgentReport>>,
         ) -> Result<Response<Self::SessionStream>, Status> {
             let (cmd_tx, cmd_rx) = mpsc::channel::<Result<CoachCommand, Status>>(32);
-            let mut inbound     = request.into_inner();
-            let done            = self.done.clone();
-            let success_count   = self.success_count.clone();
-            let _expect         = self.expect_transfers; // kept for struct compat
+            let mut inbound = request.into_inner();
+            let done = self.done.clone();
+            let success_count = self.success_count.clone();
+            let _expect = self.expect_transfers; // kept for struct compat
 
             tokio::spawn(async move {
                 // 1. Discard initial identification report.
                 let _ = inbound.next().await;
 
                 // 2. Send SliceTick(0).
-                let _ = cmd_tx.send(Ok(CoachCommand {
-                    payload: Some(coach_command::Payload::SliceTick(SliceTick {
-                        slice_index: 0, wall_clock_ms: 0,
-                    })),
-                })).await;
+                let _ = cmd_tx
+                    .send(Ok(CoachCommand {
+                        payload: Some(coach_command::Payload::SliceTick(SliceTick {
+                            slice_index: 0,
+                            wall_clock_ms: 0,
+                        })),
+                    }))
+                    .await;
 
                 // 3. Wait for SliceAck(0).
                 // NOTE: we do NOT wait for MetricsUpdates here.  The agent only
@@ -863,11 +975,16 @@ mod tests {
                     match inbound.next().await {
                         Some(Ok(report)) => {
                             if let Some(agent_report::Payload::SliceAck(ack)) = &report.payload {
-                                if ack.slice_index == 0 { break; }
+                                if ack.slice_index == 0 {
+                                    break;
+                                }
                             }
                             // Any other payload (rare) - keep waiting.
                         }
-                        _ => { done.notify_one(); return; }
+                        _ => {
+                            done.notify_one();
+                            return;
+                        }
                     }
                 }
 
@@ -875,12 +992,14 @@ mod tests {
                 // The agent will immediately send an in-flight snapshot
                 // MetricsUpdate (success=false, rich detail) for every
                 // transfer that was still running, then drain silently.
-                let _ = cmd_tx.send(Ok(CoachCommand {
-                    payload: Some(coach_command::Payload::Shutdown(ShutdownCmd {
-                        graceful: true,
-                        reason:   "mock test complete".into(),
-                    })),
-                })).await;
+                let _ = cmd_tx
+                    .send(Ok(CoachCommand {
+                        payload: Some(coach_command::Payload::Shutdown(ShutdownCmd {
+                            graceful: true,
+                            reason: "mock test complete".into(),
+                        })),
+                    }))
+                    .await;
 
                 // 5. Collect the in-flight snapshot MetricsUpdate.
                 // Under the new protocol aerogym sends one MetricsUpdate with
@@ -905,13 +1024,13 @@ mod tests {
     // ── Helper: start mock server on a random port ────────────────────────
 
     struct MockServer {
-        port:     u16,
+        port: u16,
         shutdown: CancellationToken,
     }
 
     async fn start_mock(coach: MockCoach) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port     = listener.local_addr().unwrap().port();
+        let port = listener.local_addr().unwrap().port();
         let shutdown = CancellationToken::new();
         let srv_shutdown = shutdown.clone();
 
@@ -936,7 +1055,9 @@ mod tests {
 
         // Wait until the port is reachable.
         for _ in 0..20 {
-            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() { break; }
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
 
@@ -946,41 +1067,36 @@ mod tests {
     // ── Helper: build agent config ────────────────────────────────────────
 
     fn agent_config(port: u16, ftp_user: &str, ftp_pass: &str) -> Config {
-        let port_s    = port.to_string();
-        let user_s    = ftp_user.to_string();
-        let pass_s    = ftp_pass.to_string();
+        let port_s = port.to_string();
+        let user_s = ftp_user.to_string();
+        let pass_s = ftp_pass.to_string();
         Config::from_source(move |name| match name {
-            "AEROGYM_AGENT_ID"  => Some("a00".into()),
-            "AEROCOACH_URL"     => Some(format!("http://127.0.0.1:{}", port_s)),
+            "AEROGYM_AGENT_ID" => Some("a00".into()),
+            "AEROCOACH_URL" => Some(format!("http://127.0.0.1:{}", port_s)),
             "AEROSTRESS_TARGET" => Some("127.0.0.1:21".into()),
-            "AEROSTRESS_USER"   => Some(user_s.clone()),
-            "AEROSTRESS_PASS"   => Some(pass_s.clone()),
+            "AEROSTRESS_USER" => Some(user_s.clone()),
+            "AEROSTRESS_PASS" => Some(pass_s.clone()),
             _ => None,
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     // ── Helper: run the agent through registration + session ──────────────
 
-    async fn run_agent(
-        port:     u16,
-        _plan:    &LoadPlan,
-        ftp_user: &str,
-        ftp_pass: &str,
-        ftp_port: u16,
-    ) {
+    async fn run_agent(port: u16, _plan: &LoadPlan, ftp_user: &str, ftp_pass: &str, ftp_port: u16) {
         let mut cfg = agent_config(port, ftp_user, ftp_pass);
         cfg.ftp_target = format!("127.0.0.1:{ftp_port}");
 
         let reg = registration::register(&cfg).await.expect("register failed");
         let mut plan_local = AgentPlan::new(reg.load_plan, reg.agent_index);
 
-        let work_dir = std::env::temp_dir()
-            .join(format!("aerogym_test_{:016x}", rand::random::<u64>()));
+        let work_dir =
+            std::env::temp_dir().join(format!("aerogym_test_{:016x}", rand::random::<u64>()));
         tokio::fs::create_dir_all(&work_dir).await.unwrap();
 
-        let bucket_files =
-            file_manager::generate(&work_dir, &cfg.agent_id, plan_local.buckets())
-            .await.expect("file gen failed");
+        let bucket_files = file_manager::generate(&work_dir, &cfg.agent_id, plan_local.buckets())
+            .await
+            .expect("file gen failed");
 
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
@@ -1002,11 +1118,16 @@ mod tests {
             slice_duration_ms: 1_000,
             total_agents: 1,
             total_bandwidth_bps: 0,
-            slices: vec![TimeSlice { slice_index: 0, total_connections: 0 }],
+            slices: vec![TimeSlice {
+                slice_index: 0,
+                total_connections: 0,
+            }],
             file_distribution: Some(FileSizeDistribution {
                 buckets: vec![FileSizeBucket {
                     bucket_id: "xs".into(),
-                    size_min_bytes: 1, size_max_bytes: 2, percentage: 1.0,
+                    size_min_bytes: 1,
+                    size_max_bytes: 2,
+                    percentage: 1.0,
                 }],
             }),
         }
@@ -1018,13 +1139,18 @@ mod tests {
             start_time_ms: 0,
             slice_duration_ms: 1_000,
             total_agents: 1,
-            total_bandwidth_bps: 0,   // unlimited
-            slices: vec![TimeSlice { slice_index: 0, total_connections: connections }],
+            total_bandwidth_bps: 0, // unlimited
+            slices: vec![TimeSlice {
+                slice_index: 0,
+                total_connections: connections,
+            }],
             file_distribution: Some(FileSizeDistribution {
                 buckets: vec![FileSizeBucket {
                     // Tiny files so the upload completes fast even with pyftpdlib.
                     bucket_id: "xs".into(),
-                    size_min_bytes: 512, size_max_bytes: 1024, percentage: 1.0,
+                    size_min_bytes: 512,
+                    size_max_bytes: 1024,
+                    percentage: 1.0,
                 }],
             }),
         }
@@ -1042,12 +1168,12 @@ mod tests {
     /// on the FTP side.
     #[tokio::test]
     async fn agent_completes_session_with_mock_coach() {
-        let done   = Arc::new(Notify::new());
-        let mock   = MockCoach {
-            plan:             plan_no_transfers(),
+        let done = Arc::new(Notify::new());
+        let mock = MockCoach {
+            plan: plan_no_transfers(),
             expect_transfers: 0,
-            done:             done.clone(),
-            success_count:    Arc::new(AtomicUsize::new(0)),
+            done: done.clone(),
+            success_count: Arc::new(AtomicUsize::new(0)),
         };
 
         let server = start_mock(mock).await;
@@ -1076,8 +1202,8 @@ mod tests {
     /// exactly 2 successful `TransferRecord`s.
     #[tokio::test]
     async fn agent_transfers_files_via_ftp() {
-        const FTP_PORT:   u16 = 2121;
-        const TRANSFERS:  u32 = 2;
+        const FTP_PORT: u16 = 2121;
+        const TRANSFERS: u32 = 2;
 
         // Skip gracefully if the FTP server is not reachable.
         if std::net::TcpStream::connect(format!("127.0.0.1:{FTP_PORT}")).is_err() {
@@ -1085,13 +1211,13 @@ mod tests {
             return;
         }
 
-        let done          = Arc::new(Notify::new());
+        let done = Arc::new(Notify::new());
         let success_count = Arc::new(AtomicUsize::new(0));
         let mock = MockCoach {
-            plan:             plan_with_transfers(TRANSFERS),
+            plan: plan_with_transfers(TRANSFERS),
             expect_transfers: TRANSFERS as usize,
-            done:             done.clone(),
-            success_count:    success_count.clone(),
+            done: done.clone(),
+            success_count: success_count.clone(),
         };
 
         let server = start_mock(mock).await;
@@ -1099,9 +1225,11 @@ mod tests {
         run_agent(
             server.port,
             &plan_with_transfers(TRANSFERS),
-            "test", "secret",
+            "test",
+            "secret",
             FTP_PORT,
-        ).await;
+        )
+        .await;
 
         tokio::time::timeout(std::time::Duration::from_secs(15), done.notified())
             .await
