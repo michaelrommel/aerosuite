@@ -144,8 +144,8 @@ impl AppState {
         let (stop_tx, _)      = watch::channel(false);
         let (ws_tx, _ws_rx_0) = broadcast::channel(WS_BROADCAST_CAPACITY);
         Self {
-            coach_state:      CoachState::Waiting,
-            load_plan:        None,
+            coach_state: CoachState::Waiting,
+            load_plan:   None,
             registry:         registry::Registry::new(),
             metrics:          metrics_store::MetricsStore::new(),
             ack_notify:       Arc::new(Notify::new()),
@@ -178,6 +178,7 @@ impl AppState {
     }
 
     /// How many agents are currently registered (connected or not).
+    #[allow(dead_code)]
     pub fn agent_count(&self) -> usize {
         self.registry.len()
     }

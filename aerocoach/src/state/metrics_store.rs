@@ -75,6 +75,7 @@ impl MetricsStore {
     }
 
     /// Total transfers recorded across all agents.
+    #[allow(dead_code)]
     pub fn total_count(&self) -> u64 {
         self.totals
             .values()

@@ -1,13 +1,13 @@
 {
-	"plan_id": "Short Sequential 20MB/s",
+	"plan_id": "Short Parallel Large Files Unlimited BW",
 	"slice_duration_ms": 30000,
-	"total_bandwidth_bps": 20971520,
+	"total_bandwidth_bps": 0,
 	"file_distribution": {
 		"buckets": [
 			{
 				"bucket_id": "md",
-				"size_min_bytes": 63897600,
-				"size_max_bytes": 63897610,
+				"size_min_bytes": 104857600,
+				"size_max_bytes": 104857601,
 				"percentage": 1
 			}
 		]

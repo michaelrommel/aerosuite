@@ -29,6 +29,7 @@
 /// let total: u32 = (0..3).map(|i| per_agent_connections(10, i, 3)).sum();
 /// assert_eq!(total, 10);
 /// ```
+#[allow(dead_code)]
 pub fn per_agent_connections(total: u32, agent_index: u32, total_agents: u32) -> u32 {
     debug_assert!(total_agents > 0, "total_agents must be > 0");
     debug_assert!(
@@ -55,6 +56,7 @@ pub fn per_agent_connections(total: u32, agent_index: u32, total_agents: u32) ->
 /// // 100 Mbit/s across 4 agents → 25 Mbit/s each
 /// assert_eq!(per_agent_bandwidth(104_857_600, 4), 26_214_400);
 /// ```
+#[allow(dead_code)]
 pub fn per_agent_bandwidth(total_bps: u64, total_agents: u32) -> u64 {
     debug_assert!(total_agents > 0, "total_agents must be > 0");
     total_bps / total_agents as u64

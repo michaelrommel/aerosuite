@@ -2,8 +2,8 @@
 //!
 //! Handles the two RPCs defined in `aeromonitor.proto`:
 //!
-//! - [`register`] — unary: validate agent, assign index, return [`LoadPlan`].
-//! - [`session`] — bidirectional stream: receive [`AgentReport`]s, send
+//! - [`register`] - unary: validate agent, assign index, return [`LoadPlan`].
+//! - [`session`] - bidirectional stream: receive [`AgentReport`]s, send
 //!   [`CoachCommand`]s for the lifetime of the test.
 //!
 //! # Session lifecycle
@@ -171,7 +171,7 @@ impl AgentService for AgentServiceImpl {
                     }
                 }
             }
-            // Close only if this is still the current session — prevents a
+            // Close only if this is still the current session - prevents a
             // stale task from clobbering a newer session the agent opened
             // after reconnecting.
             state.write().await.registry.close_session(&aid, session_gen);
@@ -209,7 +209,7 @@ async fn handle_report(state: &SharedState, report: &AgentReport) {
 
             // Discard metrics that arrive after a coach reset.  Once the coach
             // is back in WAITING state, any incoming MetricsUpdate belongs to
-            // the tail of the previous test run (e.g. the agent’s final flush
+            // the tail of the previous test run (e.g. the agent's final flush
             // after an abort) and must not repopulate the freshly-cleared
             // MetricsStore with stale error counts.
             if write.coach_state.is_waiting() {
@@ -230,6 +230,18 @@ async fn handle_report(state: &SharedState, report: &AgentReport) {
                 active    = update.active_connections,
                 completed = update.completed_transfers.len(),
                 "metrics update"
+            );
+        }
+        Some(agent_report::Payload::PlanAck(_)) => {
+            let mut write = state.write().await;
+            write.registry.ack_plan(agent_id);
+            let acked = write.registry.plan_ack_count();
+            let total = write.registry.len();
+            info!(
+                agent_id = %agent_id,
+                acked,
+                total,
+                "plan ack received"
             );
         }
         None => {

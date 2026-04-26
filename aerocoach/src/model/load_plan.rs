@@ -235,9 +235,12 @@ impl LoadPlanFile {
         self.slices.len() as u32
     }
 
-    /// Returns 1 as a placeholder for the `RegisterResponse`; the real agent
-    /// count is broadcast to all agents via a [`LoadPlanUpdate`] the moment
-    /// `POST /start` fires, before the first `SliceTick`.
+    /// Returns 1 as a placeholder for the `RegisterResponse`.
+    ///
+    /// The real agent count is pushed to all connected agents via a
+    /// [`LoadPlanUpdate`] when the operator clicks **Confirm Plan**
+    /// (`POST /confirm`), and again at `POST /start` as a safety net for
+    /// any agents that joined after the last Confirm.
     pub fn total_agents_hint(&self) -> u32 {
         1
     }

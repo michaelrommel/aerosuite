@@ -1,13 +1,13 @@
 {
-	"plan_id": "Short Parallel 10MB/s",
+	"plan_id": "Short Parallel 10 MiBit/s",
 	"slice_duration_ms": 65000,
-	"total_bandwidth_bps": 10485760,
+	"total_bandwidth_bps": 1310720,
 	"file_distribution": {
 		"buckets": [
 			{
 				"bucket_id": "md",
-				"size_min_bytes": 63897600,
-				"size_max_bytes": 63897610,
+				"size_min_bytes": 78643200,
+				"size_max_bytes": 78643201,
 				"percentage": 1
 			}
 		]

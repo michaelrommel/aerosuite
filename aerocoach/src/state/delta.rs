@@ -45,6 +45,9 @@ pub struct AgentSnapshot {
     /// Current in-flight bytes across all active transfers.
     /// Reported by the agent on every heartbeat; reset to 0 when idle.
     pub bytes_in_flight:    u64,
+    /// `true` once the agent has sent a `PlanAck` after the last Confirm.
+    /// Lets the UI show which agents have the confirmed plan before Start.
+    pub plan_acked:         bool,
 }
 
 /// One completed transfer record augmented with its source agent.
@@ -71,7 +74,7 @@ pub struct GlobalStats {
     pub total_errors:            u32,
     pub active_agents:           u32,
     pub active_connections:      u32,
-    /// Fraction of transfers that resulted in an error (0.0 – 1.0).
+    /// Fraction of transfers that resulted in an error (0.0 - 1.0).
     pub overall_error_rate:      f64,
     /// Instantaneous aggregate bandwidth in bytes/s (computed from delta bytes
     /// divided by the elapsed interval since the previous `compute` call).
@@ -80,31 +83,43 @@ pub struct GlobalStats {
 
 // ── DeltaEngine ────────────────────────────────────────────────────────────
 
+/// Smoothing factor for the exponential moving average applied to the raw
+/// per-tick bandwidth sample.  α = 0.4 gives a half-life of roughly 2 ticks
+/// (~6 s): fast enough to track a ramp-up within one slice, slow enough to
+/// damp single-tick jitter caused by heartbeat/ticker phase drift.
+const EMA_ALPHA: f64 = 0.6;
+
 /// Computes `DashboardUpdate` payloads for broadcast to WebSocket clients.
-///
-/// Tracks the timestamp of the previous call to derive instantaneous bandwidth.
 pub struct DeltaEngine {
-    last_compute_ms: i64,
-    /// Previous `bytes_in_flight` per agent, used to compute the delta
-    /// contribution of in-progress transfers between ticks.
-    prev_inflight:   std::collections::HashMap<String, u64>,
+    last_compute_ms:  i64,
+    /// Sum of `bytes_transferred` (cumulative completed) + `bytes_in_flight`
+    /// (currently in-pipe) across all agents at the previous tick.
+    ///
+    /// This quantity is monotonically non-decreasing and continuous: when a
+    /// transfer finishes, `bytes_transferred` rises by exactly the same amount
+    /// that `bytes_in_flight` falls, so the total never jumps.  Its derivative
+    /// is the true wire bandwidth regardless of file size or completion rate.
+    prev_total_bytes: u64,
+    /// Exponentially smoothed bandwidth in bytes/s.
+    smoothed_bps:     f64,
 }
 
 impl DeltaEngine {
     pub fn new() -> Self {
         Self {
-            last_compute_ms: Utc::now().timestamp_millis(),
-            prev_inflight:   std::collections::HashMap::new(),
+            last_compute_ms:  Utc::now().timestamp_millis(),
+            prev_total_bytes: 0,
+            smoothed_bps:     0.0,
         }
     }
 
     /// Build a [`DashboardUpdate`] from a pre-collected snapshot of state.
     ///
     /// # Parameters
-    /// - `current_slice` / `total_slices` — from `CoachState` and the plan.
-    /// - `registry_snapshot` — from `Registry::status_snapshot()`.
-    /// - `totals_fn` — closure returning cumulative `AgentTotals` for one agent.
-    /// - `drained` — transfers drained from `MetricsStore` since the last call.
+    /// - `current_slice` / `total_slices` - from `CoachState` and the plan.
+    /// - `registry_snapshot` - from `Registry::status_snapshot()`.
+    /// - `totals_fn` - closure returning cumulative `AgentTotals` for one agent.
+    /// - `drained` - transfers drained from `MetricsStore` since the last call.
     pub fn compute(
         &mut self,
         current_slice:     u32,
@@ -135,6 +150,7 @@ impl DeltaEngine {
                     private_ip:         s.private_ip.clone(),
                     instance_id:        s.instance_id.clone(),
                     bytes_in_flight:    t.bytes_in_flight,
+                    plan_acked:         s.plan_acked,
                 }
             })
             .collect();
@@ -153,57 +169,43 @@ impl DeltaEngine {
             0.0
         };
 
-        // ── Instantaneous bandwidth ────────────────────────────────────────────
+        // ── Bandwidth: total-bytes-in-system derivative + EMA ─────────────────
         //
-        // For in-flight transfers: use the positive delta of bytes_in_flight
-        // vs. the previous snapshot — this correctly reflects incremental
-        // progress within each 3 s window.
+        // Track the sum of (cumulative completed bytes) + (current in-flight
+        // bytes) across all agents.  When a transfer finishes, bytes_transferred
+        // rises by B and bytes_in_flight falls by B, so the total is continuous
+        // with no discontinuity at completion.  The derivative of this quantity
+        // is the true instantaneous wire rate for any file size or mix:
         //
-        // For completed transfers: bytes_transferred is the *cumulative total*
-        // for the whole transfer, not just the last window.  If the agent was
-        // sending heartbeats (prev_inflight > 0), those earlier bytes were
-        // already counted in previous delta_inflight contributions.  Subtract
-        // prev_inflight to keep only the tail that wasn’t yet reported,
-        // preventing the final tick from spiking to the full-file rate.
-        // Transfers with no prior inflight tracking (fast/unlimited) have
-        // prev_inflight == 0, so their full bytes_transferred is used as-is.
-
-        // Sum completed bytes per agent (there may be several concurrent).
-        let mut completed_by_agent: std::collections::HashMap<&str, u64> =
-            std::collections::HashMap::new();
-        for (agent_id, r) in drained.iter().filter(|(_, r)| r.success) {
-            *completed_by_agent.entry(agent_id.as_str()).or_insert(0) += r.bytes_transferred;
-        }
-        let delta_completed: u64 = completed_by_agent
+        //   • Small files (complete within one tick): their full
+        //     bytes_transferred shows up in the cumulative total; there is no
+        //     inflight residual to subtract, so they are never under-counted.
+        //
+        //   • Large files (span multiple ticks): their progress is captured by
+        //     the growing bytes_in_flight; on completion the bytes_transferred
+        //     replaces the inflight contribution seamlessly.
+        //
+        //   • Mixed workloads: both contributions add up correctly because the
+        //     total is a single monotone counter rather than two separate
+        //     per-agent deltas that can cancel each other.
+        //
+        // An EMA (α = 0.4) smooths tick-to-tick jitter from the unsynchronised
+        // aerogym heartbeat and aerocoach delta timers without hiding real
+        // ramp-up / ramp-down trends.
+        let total_now: u64 = agents
             .iter()
-            .map(|(agent_id, &total)| {
-                let prev = self.prev_inflight.get(*agent_id).copied().unwrap_or(0);
-                total.saturating_sub(prev)
-            })
+            .map(|a| a.bytes_transferred + a.bytes_in_flight)
             .sum();
-
-        let delta_inflight: u64 = agents
-            .iter()
-            .map(|a| {
-                let prev = self.prev_inflight.get(&a.agent_id).copied().unwrap_or(0);
-                a.bytes_in_flight.saturating_sub(prev)
-            })
-            .sum();
-
-        // Update stored snapshot for next tick.
-        self.prev_inflight = agents
-            .iter()
-            .map(|a| (a.agent_id.clone(), a.bytes_in_flight))
-            .collect();
-
-        let current_bandwidth_bps =
-            ((delta_completed + delta_inflight) as f64 / elapsed_secs) as u64;
+        let raw_bps = total_now.saturating_sub(self.prev_total_bytes) as f64 / elapsed_secs;
+        self.smoothed_bps     = EMA_ALPHA * raw_bps + (1.0 - EMA_ALPHA) * self.smoothed_bps;
+        self.prev_total_bytes = total_now;
+        let current_bandwidth_bps = self.smoothed_bps as u64;
 
         tracing::debug!(
             elapsed_ms        = (elapsed_secs * 1000.0) as u64,
-            delta_completed_b = delta_completed,
-            delta_inflight_b  = delta_inflight,
-            bandwidth_bps     = current_bandwidth_bps,
+            total_bytes_now   = total_now,
+            raw_bps,
+            smoothed_bps      = current_bandwidth_bps,
             bandwidth_mbit    = (current_bandwidth_bps * 8) / 1_000_000,
             "bandwidth tick"
         );
@@ -268,6 +270,7 @@ mod tests {
             current_slice:      0,
             active_connections: conns,
             connected,
+            plan_acked:         false,
         }
     }
 
@@ -348,6 +351,74 @@ mod tests {
         assert_eq!(update.completed_transfers[0].agent_id, "a00");
         assert!(update.completed_transfers[0].success);
         assert!(!update.completed_transfers[1].success);
+    }
+
+    #[test]
+    fn bandwidth_correct_for_small_files() {
+        // Simulate 100 small files (1 MB each) completing entirely within one
+        // tick window.  bytes_in_flight stays near zero; all throughput is in
+        // bytes_transferred.  The old algorithm would zero this out when a
+        // large prev_inflight value was present; the new one must not.
+        let mut engine = DeltaEngine::new();
+        let snapshot = [make_status("a00", 0, true, 50)];
+
+        // Tick 1: large file partially transferred (60 MB in-flight),
+        // no completions yet.
+        let totals_t1 = AgentTotals {
+            bytes_transferred: 0,
+            bytes_in_flight:   60 * 1024 * 1024,
+            success_count: 0, error_count: 0,
+        };
+        let u1 = engine.compute(0, 1, &snapshot, |_| totals_t1.clone(), &[]);
+        // First tick: raw_bps = (60 MB - 0) / ~3 s = ~20 MB/s, smoothed.
+        assert!(u1.global_stats.current_bandwidth_bps > 0);
+
+        // Tick 2: large file still running (80 MB in-flight = 20 MB progress),
+        // AND 100 small files completed (100 MB total).
+        // Old algorithm: delta_completed = 100 MB - 60 MB = 40 MB (prev_inflight
+        // of the large file cancels the small files).
+        // New algorithm: total = 80 + 100 = 180 MB, prev = 60 MB, delta = 120 MB.
+        let totals_t2 = AgentTotals {
+            bytes_transferred: 100 * 1024 * 1024,  // 100 small files done
+            bytes_in_flight:   80  * 1024 * 1024,  // large file still running
+            success_count: 100, error_count: 0,
+        };
+        let u2 = engine.compute(0, 1, &snapshot, |_| totals_t2.clone(), &[]);
+        // 120 MB delta / 3 s = 40 MB/s raw; EMA-smoothed value must be
+        // substantially above zero and above the tick-1 value.
+        assert!(
+            u2.global_stats.current_bandwidth_bps > u1.global_stats.current_bandwidth_bps,
+            "bandwidth should rise as both large and small file bytes flow"
+        );
+    }
+
+    #[test]
+    fn bandwidth_continuous_across_file_completion() {
+        // When a large file completes, bytes_transferred rises and
+        // bytes_in_flight falls by the same amount.  The total-in-system stays
+        // flat: delta = 0, so raw_bps = 0 and the EMA decays — no spike.
+        let mut engine = DeltaEngine::new();
+        let snapshot = [make_status("a00", 0, true, 1)];
+
+        // Tick 1: 100 MB in-flight, nothing completed yet.
+        let t1 = AgentTotals { bytes_transferred: 0, bytes_in_flight: 100 * 1024 * 1024,
+            success_count: 0, error_count: 0 };
+        let u1 = engine.compute(0, 1, &snapshot, |_| t1.clone(), &[]);
+        let bw1 = u1.global_stats.current_bandwidth_bps;
+        assert!(bw1 > 0, "first tick should show positive bandwidth from in-flight data");
+
+        // Tick 2: file completes (bytes_transferred = 100 MB, in_flight drops
+        // to 0).  total_now == total_prev, so raw_bps = 0.
+        let t2 = AgentTotals { bytes_transferred: 100 * 1024 * 1024, bytes_in_flight: 0,
+            success_count: 1, error_count: 0 };
+        let u2 = engine.compute(0, 1, &snapshot, |_| t2.clone(), &[]);
+        let bw2 = u2.global_stats.current_bandwidth_bps;
+
+        // EMA decays: bw2 = 0.4*0 + 0.6*bw1 = 0.6*bw1 < bw1.
+        assert!(
+            bw2 < bw1,
+            "bandwidth should decay (not spike) when a file completes with no new data"
+        );
     }
 
     #[test]

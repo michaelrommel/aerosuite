@@ -1,0 +1,51 @@
+{
+	"plan_id": "Client Redistribution Test 8 MiBit/s w/ Buckets",
+	"slice_duration_ms": 30000,
+	"total_bandwidth_bps": 1048576,
+	"file_distribution": {
+		"buckets": [
+			{
+				"bucket_id": "xs",
+				"size_min_bytes": 131288,
+				"size_max_bytes": 131289,
+				"percentage": 0.4
+			},
+			{
+				"bucket_id": "sm",
+				"size_min_bytes": 1048576,
+				"size_max_bytes": 1048577,
+				"percentage": 0.1
+			},
+			{
+				"bucket_id": "md",
+				"size_min_bytes": 31457280,
+				"size_max_bytes": 31457281,
+				"percentage": 0.1
+			},
+			{
+				"bucket_id": "lg",
+				"size_min_bytes": 62914560,
+				"size_max_bytes": 62914561,
+				"percentage": 0.4
+			}
+		]
+	},
+	"slices": [
+		{ "slice_index": 0, "total_connections": 100 },
+		{ "slice_index": 1, "total_connections": 300 },
+		{ "slice_index": 2, "total_connections": 600 },
+		{ "slice_index": 3, "total_connections": 900 },
+		{ "slice_index": 4, "total_connections": 1200 },
+		{ "slice_index": 5, "total_connections": 1500 },
+		{ "slice_index": 6, "total_connections": 1800 },
+		{ "slice_index": 7, "total_connections": 2100 },
+		{ "slice_index": 8, "total_connections": 2300 },
+		{ "slice_index": 9, "total_connections": 2600 },
+		{ "slice_index": 10, "total_connections": 2900 },
+		{ "slice_index": 11, "total_connections": 3200 },
+		{ "slice_index": 12, "total_connections": 2000 },
+		{ "slice_index": 13, "total_connections": 1000 },
+		{ "slice_index": 14, "total_connections": 500 },
+		{ "slice_index": 15, "total_connections": 0 }
+	]
+}

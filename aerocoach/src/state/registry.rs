@@ -17,7 +17,8 @@ use tracing::{debug, info, warn};
 
 use aeroproto::aeromonitor::CoachCommand;
 
-/// Capacity of each per-agent command channel.
+#[cfg(test)]
+/// Capacity of each per-agent command channel (used only by test helpers).
 const CMD_CHANNEL_CAPACITY: usize = 64;
 
 // ── AgentEntry ────────────────────────────────────────────────────────────
@@ -42,6 +43,11 @@ pub struct AgentEntry {
 
     /// Number of active FTP transfers as of the last MetricsUpdate.
     pub active_connections: u32,
+
+    /// True once the agent has sent a [`PlanAck`] after the last Confirm.
+    /// Reset to `false` at the start of each new Confirm broadcast so the UI
+    /// always reflects the current round of confirmations.
+    pub plan_acked: bool,
 
     /// True while the agent has an open `Session` stream.
     pub connected: bool,
@@ -69,11 +75,12 @@ impl AgentEntry {
             agent_index,
             private_ip,
             instance_id,
-            current_slice: 0,
+            current_slice:      0,
             active_connections: 0,
-            connected: false,
-            session_gen: 0,
-            cmd_tx: None,
+            connected:          false,
+            plan_acked:         false,
+            session_gen:        0,
+            cmd_tx:             None,
         }
     }
 }
@@ -84,25 +91,27 @@ impl AgentEntry {
 /// endpoint and the delta engine.
 #[derive(Debug, Clone)]
 pub struct AgentStatus {
-    pub agent_id: String,
-    pub agent_index: u32,
-    pub private_ip: String,
-    pub instance_id: String,
-    pub current_slice: u32,
+    pub agent_id:           String,
+    pub agent_index:        u32,
+    pub private_ip:         String,
+    pub instance_id:        String,
+    pub current_slice:      u32,
     pub active_connections: u32,
-    pub connected: bool,
+    pub connected:          bool,
+    pub plan_acked:         bool,
 }
 
 impl From<&AgentEntry> for AgentStatus {
     fn from(e: &AgentEntry) -> Self {
         Self {
-            agent_id: e.agent_id.clone(),
-            agent_index: e.agent_index,
-            private_ip: e.private_ip.clone(),
-            instance_id: e.instance_id.clone(),
-            current_slice: e.current_slice,
+            agent_id:           e.agent_id.clone(),
+            agent_index:        e.agent_index,
+            private_ip:         e.private_ip.clone(),
+            instance_id:        e.instance_id.clone(),
+            current_slice:      e.current_slice,
             active_connections: e.active_connections,
-            connected: e.connected,
+            connected:          e.connected,
+            plan_acked:         e.plan_acked,
         }
     }
 }
@@ -154,6 +163,7 @@ impl Registry {
             entry.instance_id = instance_id;
             entry.current_slice = 0;
             entry.active_connections = 0;
+            entry.plan_acked = false;
             entry.cmd_tx = None;
             info!(agent_id = %agent_id, index, "agent re-registered");
             return Ok(index);
@@ -227,6 +237,27 @@ impl Registry {
         }
     }
 
+    // ── Plan-ack tracking ─────────────────────────────────────────────────
+
+    /// Mark one agent as having acknowledged the latest plan confirm.
+    pub fn ack_plan(&mut self, agent_id: &str) {
+        if let Some(entry) = self.entries.get_mut(agent_id) {
+            entry.plan_acked = true;
+        }
+    }
+
+    /// Reset all ack flags at the start of a new Confirm broadcast.
+    pub fn reset_plan_acks(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.plan_acked = false;
+        }
+    }
+
+    /// How many agents have sent a PlanAck since the last Confirm.
+    pub fn plan_ack_count(&self) -> usize {
+        self.entries.values().filter(|e| e.plan_acked).count()
+    }
+
     // ── State updates (called from the Session receive task) ──────────────
 
     /// Record that an agent has acknowledged a slice tick.
@@ -254,10 +285,6 @@ impl Registry {
     /// Total number of registered agents (connected or not).
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// Number of agents with an active Session stream.
@@ -327,33 +354,10 @@ impl Registry {
         sent
     }
 
-    /// Attempt to send `cmd` to a single agent by id.
-    ///
-    /// Returns `true` if the send succeeded.
-    pub fn send_to(&mut self, agent_id: &str, cmd: CoachCommand) -> bool {
-        let Some(entry) = self.entries.get(agent_id) else {
-            return false;
-        };
-        let Some(ref tx) = entry.cmd_tx else {
-            return false;
-        };
-        match tx.try_send(cmd) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(agent_id = %agent_id, "command channel full");
-                false
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                let _ = tx; // end borrow before mutable borrow below
-                self.deregister(agent_id);
-                false
-            }
-        }
-    }
-
     /// Create a new bounded command channel for one agent and return both
     /// halves.  The caller is responsible for storing the sender via
     /// [`Self::set_session_channel`].
+    #[cfg(test)]
     pub fn new_cmd_channel() -> (mpsc::Sender<CoachCommand>, mpsc::Receiver<CoachCommand>) {
         mpsc::channel(CMD_CHANNEL_CAPACITY)
     }

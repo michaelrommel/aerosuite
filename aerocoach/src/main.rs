@@ -547,12 +547,10 @@ async fn start_handler(State(state): State<SharedState>) -> impl IntoResponse {
             }
         }
 
-        // Broadcast the real agent count to all connected agents so they
-        // compute their per-agent connection and bandwidth shares correctly.
-        // This MUST be sent before the first SliceTick (which fires as soon
-        // as the clock task is spawned below), so we do it here under the
-        // same write lock — the SliceTick cannot enter the channel until
-        // the clock task is spawned after this block.
+        // Re-broadcast the agent count as a safety net for agents that joined
+        // after the last Confirm (they still have total_agents=1 from
+        // registration).  Agents that already received the Confirm PlanUpdate
+        // will silently re-apply the same value.
         let total_agents = write.registry.len() as u32;
         let agent_count_cmd = CoachCommand {
             payload: Some(coach_command::Payload::PlanUpdate(LoadPlanUpdate {
@@ -789,17 +787,43 @@ async fn plan_confirm_handler(State(state): State<SharedState>) -> impl IntoResp
             .into_response();
     }
 
+    let total_agents = write.registry.len() as u32;
+
+    // Reset ack flags from any previous confirm round.
+    write.registry.reset_plan_acks();
+
+    // Extract plan data before mutably borrowing the registry for broadcast.
+    let (proto_slices, new_bandwidth_bps, plan_id) = {
+        let plan = write.load_plan.as_ref().unwrap(); // safe: checked above
+        let slices = plan
+            .slices
+            .iter()
+            .map(|s| TimeSlice {
+                slice_index:       s.slice_index,
+                total_connections: s.total_connections,
+            })
+            .collect::<Vec<_>>();
+        (slices, plan.total_bandwidth_bps, plan.plan_id.clone())
+    };
+
+    // Send a full PlanUpdate carrying the real agent count.  Agents apply it
+    // in-place — no shutdown, no re-registration.
     let cmd = CoachCommand {
-        payload: Some(coach_command::Payload::Shutdown(ShutdownCmd {
-            graceful: false,
-            reason:   "plan confirmed — re-register to receive the updated plan".to_string(),
+        payload: Some(coach_command::Payload::PlanUpdate(LoadPlanUpdate {
+            // effective_from_slice = 0 replaces all slices (full sync).
+            effective_from_slice:  0,
+            updated_slices:        proto_slices,
+            new_bandwidth_bps:     Some(new_bandwidth_bps),
+            new_file_distribution: None,
+            new_total_agents:      Some(total_agents),
         })),
     };
     let n = write.registry.broadcast(cmd);
     info!(
-        agents = n,
-        plan_id = %write.load_plan.as_ref().map(|p| p.plan_id.as_str()).unwrap_or(""),
-        "plan confirmed — ShutdownCmd broadcast to agents"
+        total_agents,
+        agents_notified = n,
+        plan_id = %plan_id,
+        "plan confirmed — PlanUpdate broadcast to agents"
     );
 
     (StatusCode::OK, Json(json!({ "status": "ok", "agents_notified": n }))).into_response()
