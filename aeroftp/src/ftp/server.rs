@@ -1,6 +1,7 @@
 use anyhow::Context;
 use libunftp::options::{ActivePassiveMode, PassiveHost};
-use opendal::{services::S3, Operator};
+use opendal::{layers::RetryLayer, services::S3, Operator};
+use std::time::Duration;
 
 use crate::aws::CachingAwsCredentialLoader;
 use tracing::{debug, error, info};
@@ -153,8 +154,31 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
         .bucket(&bucket)
         .root("/");
 
-    // Initialize the Operator
-    let op: Operator = Operator::new(builder)?.finish();
+    // Initialize the Operator, with a RetryLayer to handle transient S3 errors.
+    //
+    // Root cause: AWS S3 closes idle HTTP keep-alive connections after ~60 s.
+    // hyper's connection pool does not detect this server-side close until a
+    // request is actually sent on the stale socket, at which point the PUT
+    // fails with "error sending request for url".  opendal already classifies
+    // this as Unexpected(temporary) — i.e. retryable — but without a layer
+    // acting on that classification the error propagates straight to libunftp
+    // which then sends "451 Local error" to the FTP client.
+    //
+    // RetryLayer intercepts Unexpected(temporary) errors and retries them with
+    // exponential back-off + jitter.  Because opendal's S3 writer buffers the
+    // entire body in memory before calling PutObject (for objects below the
+    // multipart threshold), the retry simply re-fires the HTTP request without
+    // needing to re-read data from the FTP data connection.  The first retry
+    // will always succeed: hyper discards the dead socket and opens a fresh one.
+    let op: Operator = Operator::new(builder)?
+        .layer(
+            RetryLayer::new()
+                .with_max_times(4)
+                .with_min_delay(Duration::from_millis(100))
+                .with_max_delay(Duration::from_secs(2))
+                .with_jitter(),
+        )
+        .finish();
 
     // Wrap the operator with `OpendalStorage`
     let backend = OpendalStorage::new(op);
