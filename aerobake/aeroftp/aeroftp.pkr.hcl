@@ -75,9 +75,10 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 procps redis conntrack-tools",
+      "sudo apk add --no-cache ca-certificates openssh nftables curl binutils libcap-setcap logrotate iproute2 procps redis nload conntrack-tools prometheus-node-exporter",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
+      "sudo rc-update add node-exporter default",
     ]
   }
 
@@ -256,23 +257,6 @@ build {
       "sudo addgroup -S aeroftp",
       "sudo adduser -S -D -h /home/aeroftp -s /sbin/nologin -G aeroftp aeroftp",
       "sudo mkdir -p /home/aeroftp",
-      "sudo chown aeroftp:aeroftp /home/aeroftp",
-    ]
-  }
-
-  # Stage the binary via /tmp (writable by alpine), then move it into place
-  provisioner "file" {
-    source      = "../../target/release/aeroftp"
-    destination = "/tmp/aeroftp"
-  }
-
-  # Install and configure the app
-  provisioner "shell" {
-    inline = [
-      "sudo mv /tmp/aeroftp /home/aeroftp/aeroftp",
-      "sudo chown aeroftp:aeroftp /home/aeroftp/aeroftp",
-      "sudo chmod +x /home/aeroftp/aeroftp",
-      "sudo setcap CAP_NET_BIND_SERVICE=+eip /home/aeroftp/aeroftp",
     ]
   }
 
@@ -312,7 +296,23 @@ build {
       "sudo mv /tmp/_home_aeroftp_scripts_track_conn.sh /home/aeroftp/scripts/track_conn.sh",
       "sudo mv /tmp/_home_aeroftp_scripts_track_cpu.sh /home/aeroftp/scripts/track_cpu.sh",
       "sudo mv /tmp/_home_aeroftp_scripts_track_mem.sh /home/aeroftp/scripts/track_mem.sh",
-      "sudo chown -R aeroftp:aeroftp /home/aeroftp",
+      "sudo chown -R aeroftp:aeroftp /home/aeroftp/credentials.json /home/aeroftp/scripts",
+    ]
+  }
+
+  # Stage the binary via /tmp (writable by alpine), then move it into place
+  provisioner "file" {
+    source      = "../../target/release/aeroftp"
+    destination = "/tmp/aeroftp"
+  }
+
+  # Install and configure the app
+  provisioner "shell" {
+    inline = [
+      "sudo mv /tmp/aeroftp /home/aeroftp/aeroftp",
+      "sudo chown aeroftp:aeroftp /home/aeroftp/aeroftp",
+      "sudo chmod +x /home/aeroftp/aeroftp",
+      "sudo setcap CAP_NET_BIND_SERVICE=+eip /home/aeroftp/aeroftp",
     ]
   }
 

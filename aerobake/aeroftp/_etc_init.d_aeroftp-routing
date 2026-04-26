@@ -48,6 +48,10 @@ start() {
 	# Route packets marked with fwmark 13 (set by nftables) through table 100
 	ip rule add fwmark 13 table 100
 
+	# Need to add the normal AWS default route for the reply packets for prometheus
+	ip route add default via 172.16.32.1 dev eth1 metric 101 table 101
+	ip rule add fwmark 14 table 101
+
 	eend $?
 }
 

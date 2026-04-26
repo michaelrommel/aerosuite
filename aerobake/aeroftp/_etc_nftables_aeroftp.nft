@@ -32,7 +32,7 @@ table inet filter {
 		type inet_service
 		flags interval
 		# this selection also allows traffic to the builtin
-		# webserver on port 9090 for /metrics and /status
+		# webserver on port 9090/9100 for /metrics and /status
 		elements = { 20, 21, 22, 53, 1024-65535 }
 	}
 	set allowed_udp_dports {
@@ -75,6 +75,10 @@ table inet filter {
 	chain OUTPUT {
 		type route hook output priority mangle
 		policy accept
+
+		# Mark metrics responses only when the destination is outside the backend subnet
+		tcp sport 9090 ip daddr != 172.16.32.0/26 meta mark set 14
+		tcp sport 9100 ip daddr != 172.16.32.0/26 meta mark set 14
 
 		# HACK: route specific SSH packets back to my server for direct login
 		ip daddr 195.201.133.194 tcp sport 22 meta mark set 13
