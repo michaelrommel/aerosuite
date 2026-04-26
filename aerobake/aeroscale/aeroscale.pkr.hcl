@@ -75,7 +75,7 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm procps redis curl tcpdump dnsmasq",
+      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm dnsmasq procps redis curl tcpdump nload",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
       "sudo rc-update add dnsmasq default",
@@ -338,7 +338,7 @@ build {
       "sudo chown root:root /etc/conf.d/aeroscale",
       "sudo chown root:root /etc/init.d/aeroscale",
       "sudo chown root:root /etc/logrotate.d/aeroscale",
-      "sudo rc-update add aeroscale default",
+      "# sudo rc-update add aeroscale default",
     ]
   }
 
