@@ -14,15 +14,18 @@
 	);
 	const errorPct = $derived((errorRate * 100).toFixed(2));
 	const errColor = $derived(errorRateColor(errorRate));
-	const pace     = $derived(snapshot ? dashboard.paceIcon(snapshot.current_slice) : '🐇');
+	const icon     = $derived(snapshot ? dashboard.rotationIcon(snapshot.agent_index) : '🔥');
+	// True when the agent is connected but deliberately idle in its cooldown
+	// window — distinct from disconnected (lost gRPC link).
+	const cooling  = $derived(!!snapshot?.connected && icon === '💤');
 </script>
 
 {#if !snapshot}
 	<div class="agent-box inactive" aria-label="inactive slot"></div>
 {:else}
-	<div class="agent-box active" class:disconnected={!snapshot.connected}>
+	<div class="agent-box active" class:disconnected={!snapshot.connected} class:cooling>
 		<div class="header">
-			<span class="pace">{pace}</span>
+			<span class="pace">{icon}</span>
 			<span class="agent-id">{snapshot.agent_id}</span>
 			{#if dashboard.coachState === 'WAITING'}
 				<span class="ack-badge" class:acked={snapshot.plan_acked}
@@ -79,6 +82,11 @@
 		color: var(--fg3);
 	}
 
+	.active.cooling {
+		border: 1px dashed var(--bg3);
+	}
+
+	/* disconnected takes priority over cooling when both apply */
 	.active.disconnected {
 		opacity: 0.45;
 		border-color: var(--bg3);

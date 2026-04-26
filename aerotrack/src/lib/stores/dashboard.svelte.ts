@@ -133,11 +133,29 @@ class DashboardStore {
 	}
 
 	/**
-	 * Pace icon for one agent: 🐇 if within one slice of the master clock,
-	 * 🐢 if lagging by more than one slice.
+	 * Rotation icon for one agent card.
+	 *
+	 * Mirrors the Rust constants in aerogym/src/agent/session.rs:
+	 *   DRAIN_FLEET_THRESHOLD = 25
+	 *   ROTATION_GROUPS       = 20  (each group ≈ 5% of the fleet)
+	 *   ACTIVE_GROUPS         = 12  (60% active at any time)
+	 *
+	 * Returns 🔥 when the agent is in its active window (running FTP
+	 * transfers) and 💤 when it is in its 8-slice cooldown window
+	 * (connections closed so keepalived can expire its persistence entry).
+	 * Below the fleet threshold all agents stay permanently active (🔥).
 	 */
-	paceIcon(agentSlice: number): '🐇' | '🐢' {
-		return agentSlice >= this.currentSlice - 1 ? '🐇' : '🐢';
+	rotationIcon(agentIndex: number): '🔥' | '💤' {
+		const DRAIN_FLEET_THRESHOLD = 25;
+		const ROTATION_GROUPS       = 20;
+		const ACTIVE_GROUPS         = 12;
+
+		if (this.agents.size < DRAIN_FLEET_THRESHOLD) return '🔥';
+
+		const group  = agentIndex % ROTATION_GROUPS;
+		const sMod   = this.currentSlice % ROTATION_GROUPS;
+		const active = (group + ROTATION_GROUPS - sMod) % ROTATION_GROUPS < ACTIVE_GROUPS;
+		return active ? '🔥' : '💤';
 	}
 }
 
