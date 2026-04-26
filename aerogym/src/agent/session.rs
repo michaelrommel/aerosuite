@@ -34,7 +34,7 @@ use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
 use aeroproto::aeromonitor::{
-    agent_report, coach_command, AgentReport, CoachCommand, MetricsUpdate, SliceAck,
+    agent_report, coach_command, AgentReport, CoachCommand, MetricsUpdate, PlanAck, SliceAck,
     agent_service_client::AgentServiceClient,
 };
 
@@ -70,6 +70,22 @@ struct InFlightInfo {
     /// Atomically updated by the transfer task as chunks leave the buffer.
     bytes_sent:      Arc<AtomicU64>,
 }
+
+/// Minimum number of agents in the fleet before the keepalived drain
+/// feature activates.  Below this threshold the feature is a no-op.
+const DRAIN_FLEET_THRESHOLD: u32 = 25;
+
+/// Per-slice probability (0.0–1.0) of triggering a keepalived drain when
+/// the fleet is large enough.  At 0.10 with 20+ agents: on any given slice
+/// roughly 2 agents will drain, which is enough to rotate backend stickiness
+/// without meaningfully reducing aggregate throughput.
+const DRAIN_PROBABILITY: f64 = 0.10;
+
+/// Minimum drain duration in milliseconds, regardless of slice length.
+/// Must exceed the keepalived persistence timeout configured on the server
+/// (currently 3 s) by a comfortable margin so the persistence entry is
+/// guaranteed to have expired before fresh connections are opened.
+const DRAIN_MIN_MS: u64 = 4_000;
 
 /// Open the `Session` stream and run the slice loop until the test ends.
 pub async fn run(
@@ -164,6 +180,41 @@ pub async fn run(
                             Some(coach_command::Payload::SliceTick(tick)) => {
                                 current_slice = tick.slice_index;
                                 slice_start   = tokio::time::Instant::now();
+
+                                // ── Keepalived drain (large-fleet only) ───────────────────
+                                //
+                                // keepalived's persistence table maps each client IP to a
+                                // backend for `persistence_timeout` seconds.  Because aerogym
+                                // agents never stop transferring, that timer never expires and
+                                // newly added backends never receive traffic.
+                                //
+                                // Fix: at slice boundaries, probabilistically abort ALL
+                                // in-flight transfers (including carry-overs from the previous
+                                // slice).  Dropping `AsyncFtpStream` closes the underlying TCP
+                                // connections, which is what keepalived watches.  After sleeping
+                                // longer than the persistence timeout, fresh connections from
+                                // `handle_slice_tick` will be routed to any available backend.
+                                if plan.total_agents() > DRAIN_FLEET_THRESHOLD
+                                    && rand::random::<f64>() < DRAIN_PROBABILITY
+                                {
+                                    let drain_ms = (plan.slice_duration_ms() / 2).max(DRAIN_MIN_MS);
+                                    let aborted  = active_tasks.len();
+                                    info!(
+                                        slice    = tick.slice_index,
+                                        aborted,
+                                        drain_ms,
+                                        "keepalived drain: aborting all transfers"
+                                    );
+                                    // abort_all() cancels each task at its next .await,
+                                    // which drops the AsyncFtpStream and closes the TCP socket.
+                                    active_tasks.abort_all();
+                                    while active_tasks.join_next().await.is_some() {}
+                                    in_flight.clear();
+                                    running_rates.clear();
+                                    tokio::time::sleep(Duration::from_millis(drain_ms)).await;
+                                    info!(slice = tick.slice_index, "keepalived drain complete");
+                                }
+
                                 handle_slice_tick(
                                     tick.slice_index,
                                     config,
@@ -182,10 +233,22 @@ pub async fn run(
 
                             Some(coach_command::Payload::PlanUpdate(update)) => {
                                 info!(
-                                    from_slice = update.effective_from_slice,
+                                    from_slice     = update.effective_from_slice,
+                                    total_agents   = ?update.new_total_agents,
+                                    bandwidth_bps  = ?update.new_bandwidth_bps,
+                                    slices_changed = update.updated_slices.len(),
                                     "plan update received"
                                 );
                                 plan.apply_update(update);
+                                info!(
+                                    effective_total_agents = plan.total_agents(),
+                                    my_bandwidth_bps       = plan.my_bandwidth_bps(),
+                                    "plan state after update"
+                                );
+                                report_tx
+                                    .send(make_plan_ack_report(&config.agent_id))
+                                    .await
+                                    .ok();
                             }
 
                             Some(coach_command::Payload::Shutdown(cmd)) => {
@@ -689,6 +752,14 @@ async fn shutdown(
 
 // ── Message builders ──────────────────────────────────────────────────────
 
+fn make_plan_ack_report(agent_id: &str) -> AgentReport {
+    AgentReport {
+        agent_id:    agent_id.to_string(),
+        timestamp_ms: now_ms(),
+        payload:     Some(agent_report::Payload::PlanAck(PlanAck {})),
+    }
+}
+
 fn make_ack_report(agent_id: &str, slice_index: u32) -> AgentReport {
     AgentReport {
         agent_id: agent_id.to_string(),
@@ -801,8 +872,9 @@ mod tests {
                 }
 
                 // 4. Send ShutdownCmd immediately after SliceAck.
-                // The agent will gracefully drain all in-flight transfer tasks,
-                // then send a final MetricsUpdate containing all completions.
+                // The agent will immediately send an in-flight snapshot
+                // MetricsUpdate (success=false, rich detail) for every
+                // transfer that was still running, then drain silently.
                 let _ = cmd_tx.send(Ok(CoachCommand {
                     payload: Some(coach_command::Payload::Shutdown(ShutdownCmd {
                         graceful: true,
@@ -810,14 +882,15 @@ mod tests {
                     })),
                 })).await;
 
-                // 5. Collect the final MetricsUpdate (sent during graceful shutdown).
+                // 5. Collect the in-flight snapshot MetricsUpdate.
+                // Under the new protocol aerogym sends one MetricsUpdate with
+                // all in-flight records (success=false) and then closes the
+                // stream.  Count every record regardless of success flag.
                 let mut seen_transfers = 0usize;
                 while let Some(msg) = inbound.next().await {
                     if let Ok(report) = msg {
                         if let Some(agent_report::Payload::MetricsUpdate(mu)) = &report.payload {
-                            for t in &mu.completed_transfers {
-                                if t.success { seen_transfers += 1; }
-                            }
+                            seen_transfers += mu.completed_transfers.len();
                         }
                     }
                 }
@@ -1032,12 +1105,12 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(15), done.notified())
             .await
-            .expect("mock did not see transfer completions within 15 s");
+            .expect("mock did not see transfer reports within 15 s");
 
         assert_eq!(
             success_count.load(Ordering::Relaxed),
             TRANSFERS as usize,
-            "expected {TRANSFERS} successful transfers, got {}",
+            "expected {TRANSFERS} transfer records (in-flight snapshots), got {}",
             success_count.load(Ordering::Relaxed)
         );
 

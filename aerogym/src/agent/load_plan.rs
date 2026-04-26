@@ -67,6 +67,7 @@ impl AgentPlan {
 
     /// Build a [`RateLimiterConfig`] for this agent's bandwidth share.
     /// Returns `None` when no bandwidth limit is configured (unlimited).
+    #[allow(dead_code)]
     pub fn my_rate_config(&self) -> Option<RateLimiterConfig> {
         let bps = self.my_bandwidth_bps();
         if bps == 0 {
@@ -80,6 +81,7 @@ impl AgentPlan {
     /// This is the *ideal* rate used as a floor when carry-over transfers
     /// have already consumed most of the agent's bandwidth budget.
     /// Returns `None` when bandwidth is unlimited or `n` is zero.
+    #[allow(dead_code)]
     pub fn rate_per_transfer(&self, n: u32) -> Option<RateLimiterConfig> {
         let agent_bps = self.my_bandwidth_bps();
         if agent_bps == 0 || n == 0 {

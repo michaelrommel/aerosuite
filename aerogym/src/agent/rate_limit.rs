@@ -76,6 +76,7 @@ impl RateLimiterConfig {
     }
 
     /// Approximate throughput in bytes per second implied by this config.
+    #[allow(dead_code)]
     pub fn approx_bps(&self) -> u64 {
         if self.interval_ms == 0 {
             return u64::MAX;

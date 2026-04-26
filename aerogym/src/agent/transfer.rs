@@ -134,6 +134,10 @@ pub async fn run_transfer(
         .map(|m| m.len())
         .unwrap_or(0);
 
+    // Keep a reference to bytes_sent so we can report how far the upload
+    // got before a failure, even though the Arc is moved into ftp_upload.
+    let bytes_sent_ref = Arc::clone(&bytes_sent);
+
     match ftp_upload(
         &filename,
         &local_file,
@@ -177,8 +181,20 @@ pub async fn run_transfer(
             }
         }
         Err(e) => {
-            let end_ms = now_ms();
-            warn!(filename = %filename, bucket = %bucket_id, error = %e, "transfer failed");
+            let end_ms     = now_ms();
+            let elapsed_ms = (end_ms - start_ms).max(1);
+            let bytes_sent = bytes_sent_ref.load(Ordering::Relaxed);
+            warn!(
+                filename   = %filename,
+                bucket     = %bucket_id,
+                elapsed_ms,
+                bytes_sent,
+                file_size  = file_size_bytes,
+                // {:#} walks the full anyhow cause chain:
+                // e.g. "FTP put_with_stream failed: Unexpected response: 425 Can't open data connection"
+                error      = %format!("{:#}", e),
+                "transfer failed"
+            );
             TransferOutcome {
                 conn_id,
                 filename,

@@ -2,14 +2,16 @@
 
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/zscaler_root.pem
 
-# TARGET=$1
-# if [[ -z "$TARGET" ]]; then
-# 	echo "Usage: $0 <AeroCoach container IP address>"
-# 	exit 1
-# fi
 CLUSTER=aeroftp-cluster
 
-SPOT=$1
+START=$1
+END=$2
+if [[ -z "$START" ]] || [[ -z "$END" ]]; then
+	echo "Usage: $0 <start> <end> [FARGATE]"
+	exit 1
+fi
+
+SPOT=$3
 if [[ -z "$SPOT" ]]; then
 	SPOT=FARGATE_SPOT
 fi
@@ -52,6 +54,7 @@ goto_gym() {
 }
 
 # Launch agents pointing at aerocoach's public gRPC port
-for i in {1..3}; do
-	goto_gym "0$i"
+for i in $(seq "${START}" "${END}"); do
+	TASK_OUT=$(goto_gym "0$i")
+	echo ${TASK_OUT} | jq '.tasks[0] | { taskArn: .taskArn, containerOverrides: .overrides.containerOverrides }'
 done

@@ -25,6 +25,7 @@ impl MetricsAccumulator {
     }
 
     /// Returns `true` if there are unsent outcomes waiting.
+    #[allow(dead_code)]
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
