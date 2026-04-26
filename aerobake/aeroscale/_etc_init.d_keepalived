@@ -309,7 +309,9 @@ start_pre() {
 		fi
 	done
 
-	/usr/local/bin/aeropulse --auth-pass "$VRRP_PASS"
+	/usr/local/bin/aeropulse \
+		--auth-pass "$VRRP_PASS" \
+		--persistence-timeout 3
 
 	chown root:root /etc/keepalived/notify-master.sh
 	chown root:root /etc/keepalived/notify-backup.sh
