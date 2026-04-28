@@ -53,6 +53,69 @@ pub fn new_store() -> MetricsStore {
     Arc::new(RwLock::new(MetricsState::default()))
 }
 
+// ── IPVS-only update ─────────────────────────────────────────────────────────
+
+/// Update the shared metrics store from IPVS connection counters already
+/// present in the snapshot.
+///
+/// This is a lightweight alternative to `scrape_and_push`: it makes no
+/// outbound HTTP connections and never touches CloudWatch.  It exposes two
+/// gauges per slot-assigned backend, sourced directly from the LVS subsystem
+/// data (`/proc/net/ip_vs`) that was already read during
+/// `SystemSnapshot::collect`:
+///
+/// - `ipvs_active_connections{slot="N"}`
+/// - `ipvs_inactive_connections{slot="N"}`
+///
+/// Backends that have a slot but no IPVS entry (e.g. disabled slots) are
+/// emitted with a value of 0 so they remain visible in the time-series.
+pub async fn update_from_ipvs(snapshot: &SystemSnapshot, store: &MetricsStore) {
+    let mut results: Vec<BackendMetrics> = Vec::new();
+
+    for b in &snapshot.backends {
+        let slot = match b.slot {
+            Some(s) => s,
+            None    => continue,
+        };
+
+        let (active, inactive) = b.ipvs.as_ref()
+            .map(|i| (i.active_connections, i.inactive_connections))
+            .unwrap_or((0, 0));
+
+        let mut docs = HashMap::new();
+        docs.insert(
+            "ipvs_active_connections".to_string(),
+            "Number of active IPVS connections to this backend (from /proc/net/ip_vs).".to_string(),
+        );
+        docs.insert(
+            "ipvs_inactive_connections".to_string(),
+            "Number of inactive IPVS connections to this backend (from /proc/net/ip_vs).".to_string(),
+        );
+
+        let samples = vec![
+            scrape::RawSample {
+                metric: "ipvs_active_connections".to_string(),
+                value:  active as f64,
+                kind:   scrape::SampleKind::Gauge,
+                labels: Vec::new(),
+            },
+            scrape::RawSample {
+                metric: "ipvs_inactive_connections".to_string(),
+                value:  inactive as f64,
+                kind:   scrape::SampleKind::Gauge,
+                labels: Vec::new(),
+            },
+        ];
+
+        results.push(BackendMetrics { slot, ip: b.ip, samples, docs, error: None });
+    }
+
+    results.sort_by_key(|m| m.slot);
+
+    let mut state = store.write().await;
+    state.backends = results;
+}
+
 // ── Scrape ────────────────────────────────────────────────────────────────────
 
 /// Scrape all backends that have a live (non-expired) lease, update the store,

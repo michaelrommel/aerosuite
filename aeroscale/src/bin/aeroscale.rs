@@ -416,18 +416,26 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                // Scrape metrics (always) + CloudWatch push (master only)
-                metrics::scrape_and_push(
-                    &snapshot,
-                    &metrics_store,
-                    args.scrape_port,
-                    &args.region,
-                    &*creds_r,
-                    &args.cloudwatch_namespace,
-                    is_master,
-                    args.scrape_mismatch_pct,
-                )
-                .await;
+                // Update /metrics from IPVS data already in the snapshot.
+                // No outbound scraping of backends, no CloudWatch push.
+                // (scrape_and_push is kept for future use when we move the
+                // full scrape + push pipeline out of the main cycle.)
+                metrics::update_from_ipvs(&snapshot, &metrics_store).await;
+
+                // TODO(deferred): reinstate full scrape + CloudWatch push in a
+                // separate, async-scheduled task outside the main cycle:
+                //
+                // metrics::scrape_and_push(
+                //     &snapshot,
+                //     &metrics_store,
+                //     args.scrape_port,
+                //     &args.region,
+                //     &*creds_r,
+                //     &args.cloudwatch_namespace,
+                //     is_master,
+                //     args.scrape_mismatch_pct,
+                // )
+                // .await;
 
                 // P5: Scale-up / drain algorithm (master only)
                 if is_master {
