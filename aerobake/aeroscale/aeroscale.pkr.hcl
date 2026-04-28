@@ -75,10 +75,11 @@ build {
   provisioner "shell" {
     inline = [
       "sudo apk update",
-      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm dnsmasq procps redis curl tcpdump nload",
+      "sudo apk add --no-cache ca-certificates openssh nftables socat iputils binutils logrotate iproute2 conntrack-tools keepalived ipvsadm dnsmasq procps redis curl tcpdump nload prometheus-node-exporter",
       "sudo rc-update add sshd default",
       "sudo rc-update add nftables default",
       "sudo rc-update add dnsmasq default",
+      "sudo rc-update add node-exporter default",
     ]
   }
 

@@ -229,6 +229,29 @@ start_pre() {
 
 	ip a add "$IP/$PREFIX" dev eth1
 
+	# ── eth1 policy routing (metrics scrape reply path) ─────────────────────
+	# Source-based rule: replies from this IP always use table 101 (→ eth1).
+	# fwmark alone cannot fix this because ip_route_me_harder() updates only
+	# skb->dst, not sk->sk_dst_cache. The socket cache is populated at
+	# connection time (mark=0, selects eth0); subsequent TCP packets use the
+	# cached route and bypass the fwmark rule entirely. A source-based rule is
+	# evaluated at the initial FIB lookup, so the cache is correct from the start.
+	local ETH1_IP="${IP%/*}"
+	ip route add table 101 "${ETH1_IP}/${PREFIX}" dev eth1 src "${ETH1_IP}"
+	ip route add table 101 default via 172.16.32.1 dev eth1
+	ip rule add from "${ETH1_IP}" lookup 101 prio 100
+
+	# fwmark rule: used by the rp_filter FIB lookup (via src_valid_mark=1 below),
+	# NOT for routing reply packets (the source-based rule above handles that).
+	ip rule add fwmark 14 table 101
+
+	# src_valid_mark=1: tells rp_filter to include the packet mark in its
+	# reverse-path FIB lookup. The nftables PRE chain marks new SYNs arriving
+	# on eth1 from outside 172.16.32.0/26 with mark 14, so the FIB lookup finds
+	# table 101 → default via eth1 → incoming interface matches → accept.
+	# Without this, strict rp_filter would drop those SYNs as martians.
+	sysctl -qw net.ipv4.conf.eth1.src_valid_mark=1
+
 	# ── Bring up eth2 (HA sync) ───────────────────────────────────────────────
 	einfo "Waiting for eth2 to appear..."
 	while [ ! -d "/sys/class/net/eth2" ]; do
@@ -311,7 +334,8 @@ start_pre() {
 
 	/usr/local/bin/aeropulse \
 		--auth-pass "$VRRP_PASS" \
-		--persistence-timeout 3
+		--lvs-sched "lc" \
+		--persistence-timeout 10
 
 	chown root:root /etc/keepalived/notify-master.sh
 	chown root:root /etc/keepalived/notify-backup.sh
@@ -349,6 +373,12 @@ stop_post() {
 		einfo "Removing inside IP ${INSIDE_IP} from eth1"
 		ip addr del "$INSIDE_IP" dev eth1
 	fi
+
+	# ── Remove eth1 policy routing ────────────────────────────────────────────
+	local BARE_IP="${INSIDE_IP%/*}"
+	ip rule del from "${BARE_IP}" lookup 101 prio 100 2>/dev/null || true
+	ip rule del fwmark 14 table 101 2>/dev/null || true
+	ip route flush table 101
 
 	# ── Bring eth1 down ───────────────────────────────────────────────────────
 	if [ -d "/sys/class/net/eth1" ]; then

@@ -24,7 +24,7 @@ table inet filter {
 		type inet_service
 		flags interval
 		# this selection also allows traffic to the builtin
-		# webserver on port 9090 for /metrics and /status
+		# webserver on port 9090/9100 for /metrics and /status
 		elements = { 20, 21, 22, 53, 1024-65535 }
 	}
 	set allowed_udp_dports {
@@ -63,6 +63,34 @@ table inet filter {
 
 		jump allow
 		reject with icmpx type port-unreachable
+	}
+
+	# Restore conntrack mark on established/related packets (all interfaces),
+	# and mark new connections arriving on eth1 from outside the inside subnet
+	# so that rp_filter can validate them.
+	#
+	# Without this, strict rp_filter (=1) would look up the source address
+	# (e.g. 172.16.25.68 / 172.16.16.0/20) in the main table, find eth0, and
+	# drop the SYN as a martian even though the packet legitimately arrived on
+	# eth1 via the AWS fabric router.
+	#
+	# With net.ipv4.conf.eth1.src_valid_mark=1 (set at runtime in the keepalived
+	# start_pre hook), rp_filter includes the packet mark in its FIB lookup:
+	#   mark 14 → ip rule fwmark 14 → table 101 → default via eth1 → accept.
+	#
+	# The hook runs at NF_IP_PRI_MANGLE (-150); rp_filter runs inside
+	# ip_route_input() called from ip_rcv_finish() after all PRE_ROUTING hooks,
+	# so the mark is always set before rp_filter reads it.
+	chain PRE {
+		type filter hook prerouting priority mangle
+
+		# Restore mark for established/related (catches subsequent packets
+		# in the same connection, e.g. ACKs and data after the SYN).
+		ct state established,related meta mark set ct mark
+
+		# Mark the initial SYN of new connections from outside the subnet.
+		iifname "eth1" ip saddr != 172.16.32.0/26 ct state new \
+			meta mark set 14 ct mark set 14
 	}
 
 	chain OUTPUT {
