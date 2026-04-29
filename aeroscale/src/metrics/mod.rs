@@ -44,6 +44,12 @@ pub struct BackendMetrics {
 #[derive(Debug, Default, Clone)]
 pub struct MetricsState {
     pub backends: Vec<BackendMetrics>,
+    /// Raw (unsmoothed) eth0 RX bandwidth from the most recent
+    /// `/proc/net/dev` delta, in bytes/s.  Zero until the second scaler cycle.
+    pub scaler_eth0_rx_bps_raw:      u64,
+    /// EMA-smoothed (α = 0.6) eth0 RX bandwidth in bytes/s.
+    /// This is the value Trigger 2 compares against `bw_threshold_bps_per_backend`.
+    pub scaler_eth0_rx_bps_smoothed: u64,
 }
 
 pub type MetricsStore = Arc<RwLock<MetricsState>>;
@@ -114,6 +120,23 @@ pub async fn update_from_ipvs(snapshot: &SystemSnapshot, store: &MetricsStore) {
 
     let mut state = store.write().await;
     state.backends = results;
+}
+
+// ── Scaler bandwidth update ──────────────────────────────────────────────────────
+
+/// Persist the scaler's latest eth0 RX bandwidth readings into the shared
+/// metrics store so the Prometheus `/metrics` endpoint can expose them.
+///
+/// Called from the main loop on every master cycle, after [`scaler::run`]
+/// returns.
+pub async fn update_scaler_bandwidth(
+    store:        &MetricsStore,
+    raw_bps:      u64,
+    smoothed_bps: u64,
+) {
+    let mut state = store.write().await;
+    state.scaler_eth0_rx_bps_raw      = raw_bps;
+    state.scaler_eth0_rx_bps_smoothed = smoothed_bps;
 }
 
 // ── Scrape ────────────────────────────────────────────────────────────────────

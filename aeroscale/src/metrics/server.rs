@@ -26,7 +26,7 @@ pub async fn serve(store: MetricsStore, port: u16) {
 
 async fn handler(State(store): State<MetricsStore>) -> impl axum::response::IntoResponse {
     let state = store.read().await;
-    let body  = super::exposition::format(&state.backends);
+    let body  = super::exposition::format(&*state);
     (
         [("Content-Type", "text/plain; version=0.0.4; charset=utf-8")],
         body,

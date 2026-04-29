@@ -107,12 +107,41 @@ struct Args {
     weight_state_ttl: u64,
 
     // ── Autoscaling ───────────────────────────────────────────────────────────
+    //
+    // TIME-SENSITIVE DEFAULTS: the defaults below are calibrated for TEST runs
+    // (10× time compression vs production).  For production deployment multiply
+    // the [time-sensitive] parameters by 10:
+    //   --snapshot-interval      3 s  → 30 s
+    //   --slope-threshold-per-min 250 → 25
+    //   --scale-up-cooldown-secs  12  → 120
+    //   --drain-cooldown-secs     30  → 300
 
-    /// Average IPVS active connections per active backend above which a
-    /// scale-up is triggered.  Recommended: 50% of the per-backend design
-    /// maximum.  Default: 750 (50% of 1500).
-    #[arg(long, default_value_t = 750)]
-    scale_up_threshold: u32,
+    /// Absolute average-sessions ceiling.  When crossed, scale-out fires
+    /// immediately without waiting for hysteresis cycles (hard backstop).
+    /// Default: 1200 (80 % of the 1500 passive-port ceiling).
+    /// TEST and PRODUCTION: same value — absolute connection count.
+    #[arg(long, default_value_t = 1200)]
+    hard_conn_threshold: u32,
+
+    /// Minimum average sessions before slope or bandwidth triggers are armed.
+    /// Default: 500.  TEST and PRODUCTION: same value.
+    #[arg(long, default_value_t = 500)]
+    slope_low_floor: u32,
+
+    /// Smoothed slope trigger threshold in connections per minute.
+    /// Fires when the 6-lag smoothed slope of avg_sessions exceeds this value
+    /// AND avg_sessions >= slope-low-floor.
+    /// [time-sensitive]  TEST default: 250  PRODUCTION: 25
+    #[arg(long, default_value_t = 250.0)]
+    slope_threshold_per_min: f64,
+
+    /// Per-backend bandwidth trigger threshold in bytes/s.
+    /// Bandwidth is read from /proc/net/dev (eth0 RX on the load balancer)
+    /// and divided by the number of active backends.  Backends saturate at
+    /// ≈ 2 Gbit/s inbound; default is 80 % of that (1.6 Gbit/s = 200 MB/s).
+    /// TEST and PRODUCTION: same value — physical saturation is unchanged.
+    #[arg(long, default_value_t = 200_000_000)]
+    bw_threshold_bps_per_backend: u64,
 
     /// Maximum IPVS active connections on the busiest remaining backend after
     /// a drain candidate is removed.  If the worst-case redistribution would
@@ -121,18 +150,28 @@ struct Args {
     #[arg(long, default_value_t = 500)]
     drain_threshold: u32,
 
-    /// Number of consecutive snapshot cycles a scale-up or drain condition
-    /// must persist before the action is taken (flap prevention).
+    /// Number of consecutive snapshot cycles the slope or bandwidth condition
+    /// must persist before a scale-up is taken (flap prevention).
+    /// The hard connection ceiling bypasses this counter entirely.
+    /// [time-sensitive]  TEST: 3 cycles × 3 s = 9 s  PRODUCTION: 3 × 30 s = 90 s
     #[arg(long, default_value_t = 3)]
-    hysteresis_cycles: u32,
+    scale_up_hysteresis_cycles: u32,
+
+    /// Number of consecutive snapshot cycles the drain gate must remain open
+    /// before a drain is initiated.  Tuned independently of scale-up-hysteresis-cycles
+    /// so the drain can be more or less conservative than the scale-up.
+    /// [time-sensitive]  TEST: 9 cycles × 3 s = 27 s  PRODUCTION: 9 × 30 s = 270 s
+    #[arg(long, default_value_t = 9)]
+    drain_hysteresis_cycles: u32,
 
     /// Minimum seconds between two consecutive scale-up actions.
-    /// AWS typically needs 2–3 minutes to bring a new backend InService.
-    #[arg(long, default_value_t = 120)]
+    /// [time-sensitive]  TEST default: 12 s  PRODUCTION: 120 s
+    #[arg(long, default_value_t = 12)]
     scale_up_cooldown_secs: u64,
 
     /// Minimum seconds between two consecutive drain initiations.
-    #[arg(long, default_value_t = 300)]
+    /// [time-sensitive]  TEST default: 30 s  PRODUCTION: 300 s
+    #[arg(long, default_value_t = 30)]
     drain_cooldown_secs: u64,
 
     /// Percentage difference between IPVS active connections and the backend's
@@ -186,13 +225,17 @@ async fn main() -> Result<()> {
         snapshot_interval    = args.snapshot_interval,
         dry_run              = args.dry_run,
         vip_inside           = %args.vip_inside.map(|v| v.to_string()).unwrap_or_else(|| "unset (assuming master)".into()),
-        weight_state_ttl     = args.weight_state_ttl,
-        scale_up_threshold   = args.scale_up_threshold,
-        drain_threshold      = args.drain_threshold,
-        hysteresis_cycles    = args.hysteresis_cycles,
-        scale_up_cooldown    = args.scale_up_cooldown_secs,
-        drain_cooldown       = args.drain_cooldown_secs,
-        scrape_mismatch_pct  = args.scrape_mismatch_pct,
+        weight_state_ttl             = args.weight_state_ttl,
+        hard_conn_threshold          = args.hard_conn_threshold,
+        slope_low_floor              = args.slope_low_floor,
+        slope_threshold_per_min      = args.slope_threshold_per_min,
+        bw_threshold_bps_per_backend = args.bw_threshold_bps_per_backend,
+        drain_threshold              = args.drain_threshold,
+        scale_up_hysteresis_cycles   = args.scale_up_hysteresis_cycles,
+        drain_hysteresis_cycles      = args.drain_hysteresis_cycles,
+        scale_up_cooldown_secs       = args.scale_up_cooldown_secs,
+        drain_cooldown_secs          = args.drain_cooldown_secs,
+        scrape_mismatch_pct          = args.scrape_mismatch_pct,
         term_decrements_capacity = args.term_decrements_capacity,
         "aeroscale starting"
     );
@@ -313,12 +356,16 @@ async fn main() -> Result<()> {
 
     // ── Build scale config (immutable for the lifetime of the daemon) ─────────
     let scale_config = ScaleConfig {
-        scale_up_threshold:      args.scale_up_threshold,
-        drain_threshold:         args.drain_threshold,
-        hysteresis_cycles:       args.hysteresis_cycles,
-        scale_up_cooldown_secs:  args.scale_up_cooldown_secs,
-        drain_cooldown_secs:     args.drain_cooldown_secs,
-        max_concurrent_draining: args.max_concurrent_draining,
+        hard_conn_threshold:          args.hard_conn_threshold,
+        slope_low_floor:              args.slope_low_floor,
+        slope_threshold_conn_per_min: args.slope_threshold_per_min,
+        bw_threshold_bps_per_backend: args.bw_threshold_bps_per_backend,
+        drain_threshold:              args.drain_threshold,
+        scale_up_hysteresis_cycles:   args.scale_up_hysteresis_cycles,
+        drain_hysteresis_cycles:      args.drain_hysteresis_cycles,
+        scale_up_cooldown_secs:       args.scale_up_cooldown_secs,
+        drain_cooldown_secs:          args.drain_cooldown_secs,
+        max_concurrent_draining:      args.max_concurrent_draining,
     };
 
     // Mutable scaler state: hysteresis counters and last-action timestamps.
@@ -453,6 +500,15 @@ async fn main() -> Result<()> {
                     {
                         error!("scaler pass failed: {e:#}");
                     }
+                    // Publish bandwidth readings to /metrics regardless of
+                    // whether the scaler pass succeeded; the readings are
+                    // already stored in scaler_state from the eth0 read.
+                    metrics::update_scaler_bandwidth(
+                        &metrics_store,
+                        scaler_state.bw_raw_bps,
+                        scaler_state.bw_smoothed as u64,
+                    )
+                    .await;
                 }
             }
             Err(e) => {

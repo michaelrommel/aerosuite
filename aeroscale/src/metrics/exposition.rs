@@ -20,10 +20,15 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use super::{BackendMetrics, scrape::SampleKind};
+use super::{MetricsState, scrape::SampleKind};
 
-/// Format all metrics from `backends` as Prometheus text exposition.
-pub fn format(backends: &[BackendMetrics]) -> String {
+/// Format all metrics from `state` as Prometheus text exposition.
+///
+/// Includes:
+/// - Per-backend IPVS / scraped metrics (with `slot` label)
+/// - Scaler-level eth0 RX bandwidth gauges (no label — LB-global)
+pub fn format(state: &MetricsState) -> String {
+    let backends = &state.backends;
     // Collect metadata: type and help text, keyed by metric name.
     // BTreeMap gives stable alphabetical ordering in the output.
     let mut meta: BTreeMap<&str, (SampleKind, Option<&str>)> = BTreeMap::new();
@@ -81,6 +86,28 @@ pub fn format(backends: &[BackendMetrics]) -> String {
             .ok();
         }
     }
+
+    // ── Scaler bandwidth gauges (LB-global, no per-slot label) ──────────────────
+    //
+    // `raw` is the instantaneous Δbytes/Δt from the most recent cycle.
+    // `smoothed` is the EMA-filtered value (α = 0.6) used by Trigger 2.
+    // Comparing both in Grafana shows the damping effect of the EMA.
+    writeln!(
+        out,
+        "# HELP aeroscale_eth0_rx_bps_raw \
+         Instantaneous eth0 RX rate (delta-bytes/delta-time per scaler cycle) in bytes/s."
+    ).ok();
+    writeln!(out, "# TYPE aeroscale_eth0_rx_bps_raw gauge").ok();
+    writeln!(out, "aeroscale_eth0_rx_bps_raw {}", state.scaler_eth0_rx_bps_raw).ok();
+
+    writeln!(
+        out,
+        "# HELP aeroscale_eth0_rx_bps_smoothed \
+         EMA-smoothed eth0 RX bandwidth (alpha=0.6) in bytes/s; \
+         used for Trigger 2 (per-backend bandwidth scale-out)."
+    ).ok();
+    writeln!(out, "# TYPE aeroscale_eth0_rx_bps_smoothed gauge").ok();
+    writeln!(out, "aeroscale_eth0_rx_bps_smoothed {}", state.scaler_eth0_rx_bps_smoothed).ok();
 
     out
 }
