@@ -339,7 +339,7 @@ build {
       "sudo chown root:root /etc/conf.d/aeroscale",
       "sudo chown root:root /etc/init.d/aeroscale",
       "sudo chown root:root /etc/logrotate.d/aeroscale",
-      "# sudo rc-update add aeroscale default",
+      "sudo rc-update add aeroscale default",
     ]
   }
 

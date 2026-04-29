@@ -32,7 +32,8 @@ export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.${REGION
 
 # ── Tuning ─────────────────────────────────────────────────────────────────────
 # Seconds between full state refreshes (snapshot + cleanup + scrape).
-: ${SNAPSHOT_INTERVAL:="5"}
+# PRODUCTION: 30 s   TEST (10x time-compressed): 3 s
+: ${SNAPSHOT_INTERVAL:="3"}
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 # tracing log level filter.  Set to "debug" for detailed troubleshooting.
@@ -59,28 +60,58 @@ export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.${REGION
 : ${WEIGHT_STATE_TTL:="3600"}
 
 # ── Autoscaling ───────────────────────────────────────────────────────────────
-# All scaling decisions are driven by IPVS active-connection counts (the
-# load-balancer's real-time view), not by per-backend Prometheus scrapes.
+# Scale-out is driven by three independent triggers; any one fires a scale-out.
+# The hard ceiling (Trigger 3) bypasses the hysteresis counter entirely.
+# Triggers 1 and 2 share a single hysteresis counter.
 
-# Average IPVS active connections per active backend above which a scale-up is
-# triggered.  Recommended: 50% of the per-backend design maximum (1500).
-: ${SCALE_UP_THRESHOLD:="400"}
+# Trigger 3 — hard connection ceiling (immediate scale-out, no hysteresis).
+# Fires when average IPVS sessions per active backend >= this value.
+# Default: 1200 (80 % of the 1500 passive-port ceiling).
+: ${HARD_CONN_THRESHOLD:="1200"}
+
+# Trigger 1 — smoothed connection-slope floor gate.
+# Slope and bandwidth triggers are disarmed below this session count
+# to avoid reacting to small idle-time bursts.
+: ${SLOPE_LOW_FLOOR:="500"}
+
+# Trigger 1 — smoothed slope threshold in connections per minute.
+# Fires when the 6-lag EMA slope of avg_sessions >= this value
+# AND avg_sessions >= SLOPE_LOW_FLOOR.
+# PRODUCTION value: 25 conn/min (~37 % of the 67 conn/min peak ramp rate).
+# TEST value (10x time-compressed runs): 250 conn/min.
+: ${SLOPE_THRESHOLD_PER_MIN:="250.0"}
+
+# Trigger 2 — per-backend bandwidth threshold in bytes/s.
+# Fires when (eth0 RX bytes/s) / active_backends >= this value
+# AND avg_sessions >= SLOPE_LOW_FLOOR.
+# Each backend saturates at ~2 Gbit/s inbound; 80 % = 1.6 Gbit/s = 200 MB/s.
+: ${BW_THRESHOLD_BPS_PER_BACKEND:="200000000"}
 
 # Maximum IPVS active connections allowed on the busiest remaining backend
 # after the drain candidate is removed.  If the worst-case redistribution
-# would exceed this, no drain is initiated.  Recommended: 33% of design max.
+# would exceed this, no drain is initiated.  Recommended: 33 % of design max.
 : ${DRAIN_THRESHOLD:="200"}
 
-# Number of consecutive 30-second snapshot cycles a condition must persist
-# before the action is taken.  3 cycles = ~90 seconds of sustained load.
-: ${HYSTERESIS_CYCLES:="2"}
+# Number of consecutive snapshot cycles the slope/bandwidth condition must
+# persist before a scale-up is taken.  The count is the same for test and
+# production; the effective time window scales with SNAPSHOT_INTERVAL:
+# PRODUCTION: 3 cycles × 30 s = 90 s   TEST: 3 cycles × 3 s = 9 s
+: ${SCALE_UP_HYSTERESIS_CYCLES:="3"}
+
+# Number of consecutive snapshot cycles the drain gate must remain open
+# before a drain is initiated.  Independent of SCALE_UP_HYSTERESIS_CYCLES so you
+# can make the drain more conservative than the scale-up (or vice-versa).
+# PRODUCTION: 9 cycles × 30 s = 270 s   TEST: 9 cycles × 3 s = 27 s
+: ${DRAIN_HYSTERESIS_CYCLES:="9"}
 
 # Minimum seconds between two consecutive scale-up actions.
-# AWS typically needs 2-3 minutes to bring a new backend InService.
-: ${SCALE_UP_COOLDOWN:="20"}
+# AWS typically needs 2–3 minutes to bring a new backend InService.
+# PRODUCTION: 120 s   TEST (10x time-compressed): 12 s
+: ${SCALE_UP_COOLDOWN:="12"}
 
 # Minimum seconds between two consecutive drain initiations.
-: ${DRAIN_COOLDOWN:="20"}
+# PRODUCTION: 300 s   TEST (10x time-compressed): 30 s
+: ${DRAIN_COOLDOWN:="30"}
 
 # Percentage difference between IPVS active connections and the backend's
 # scraped ftp_sessions_total that triggers a cross-check warning.

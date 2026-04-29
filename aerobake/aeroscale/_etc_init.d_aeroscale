@@ -14,9 +14,13 @@ description="AeroFTP aeroscale — backend management and autoscaling daemon"
 : ${SNAPSHOT_INTERVAL:="30"}
 : ${VIP_INSIDE:=""}   # leave empty to use IMDS tag aeroftp-vip-inside
 : ${WEIGHT_STATE_TTL:="3600"}
-: ${SCALE_UP_THRESHOLD:="750"}
+: ${HARD_CONN_THRESHOLD:="1200"}
+: ${SLOPE_LOW_FLOOR:="500"}
+: ${SLOPE_THRESHOLD_PER_MIN:="25.0"}
+: ${BW_THRESHOLD_BPS_PER_BACKEND:="200000000"}
 : ${DRAIN_THRESHOLD:="500"}
-: ${HYSTERESIS_CYCLES:="3"}
+: ${SCALE_UP_HYSTERESIS_CYCLES:="3"}
+: ${DRAIN_HYSTERESIS_CYCLES:="9"}
 : ${SCALE_UP_COOLDOWN:="120"}
 : ${DRAIN_COOLDOWN:="300"}
 : ${SCRAPE_MISMATCH_PCT:="5"}
@@ -68,9 +72,13 @@ start() {
 			--snapshot-interval    "${SNAPSHOT_INTERVAL}"   \
 			${VIP_INSIDE:+--vip-inside "${VIP_INSIDE}"}     \
 			--weight-state-ttl     "${WEIGHT_STATE_TTL}"    \
-			--scale-up-threshold   "${SCALE_UP_THRESHOLD}"  \
+			--hard-conn-threshold  "${HARD_CONN_THRESHOLD}" \
+			--slope-low-floor      "${SLOPE_LOW_FLOOR}"     \
+			--slope-threshold-per-min "${SLOPE_THRESHOLD_PER_MIN}" \
+			--bw-threshold-bps-per-backend "${BW_THRESHOLD_BPS_PER_BACKEND}" \
 			--drain-threshold      "${DRAIN_THRESHOLD}"     \
-			--hysteresis-cycles    "${HYSTERESIS_CYCLES}"   \
+			--scale-up-hysteresis-cycles "${SCALE_UP_HYSTERESIS_CYCLES}" \
+			--drain-hysteresis-cycles "${DRAIN_HYSTERESIS_CYCLES}" \
 			--scale-up-cooldown-secs "${SCALE_UP_COOLDOWN}" \
 			--drain-cooldown-secs  "${DRAIN_COOLDOWN}"      \
 			--scrape-mismatch-pct  "${SCRAPE_MISMATCH_PCT}" \
