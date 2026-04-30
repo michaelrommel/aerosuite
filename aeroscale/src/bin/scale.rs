@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 #[command(about = "Manage the FTP backend Auto Scaling Group")]
 struct Args {
     /// AWS region
-    #[arg(long, global = true, default_value = "${REGION}")]
+    #[arg(long, global = true, default_value = "eu-west-2")]
     region: String,
 
     /// Auto Scaling Group name
@@ -79,7 +79,10 @@ async fn cmd_list(region: &str, asg_name: &str, creds: &aerocore::AwsCredentials
         if group.instances.is_empty() {
             println!("    (none)");
         } else {
-            println!("    {:<25} {:<15} {:<14} {}", "Instance ID", "Health", "State", "AZ");
+            println!(
+                "    {:<25} {:<15} {:<14} {}",
+                "Instance ID", "Health", "State", "AZ"
+            );
             println!("    {}", "-".repeat(72));
             for inst in &group.instances {
                 println!(
@@ -116,7 +119,7 @@ async fn cmd_terminate(
 ) -> Result<()> {
     println!("🛑 Terminating instance '{instance_id}' in ASG '{asg_name}' ...");
     println!("   DesiredCapacity will be decremented by 1 automatically.");
-    asg::terminate_instance(region, instance_id, creds, /*decrement=*/true).await?;
+    asg::terminate_instance(region, instance_id, creds, /*decrement=*/ true).await?;
     println!("✅ Termination request accepted.");
     println!("   Run 'scale list' to watch the instance leave the group.");
     Ok(())

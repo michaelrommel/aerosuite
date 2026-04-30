@@ -41,6 +41,6 @@
     force_flush_interval = "5s"
     log_stream_name = "$INSTANCE_ID"
     mode = "EC2"
-    region = "${REGION}"
+    region = "eu-west-2"
     region_type = "ACJ"
 

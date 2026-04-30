@@ -3,14 +3,14 @@
 # Copy this file to /etc/conf.d/aeroscale and adjust the values.
 # All settings have safe defaults; only REDIS_URL usually needs changing.
 
+# ── AWS ────────────────────────────────────────────────────────────────────────
+: ${REGION:="eu-west-2"}
+
 # ── Redis ──────────────────────────────────────────────────────────────────────
 # Redis connection URL
 # For a local Redis: redis://127.0.0.1:6379
 # For a remote Redis with auth: redis://:password@192.168.1.10:6379
 export REDIS_URL=rediss://clustercfg.dev-valkey-aeroftp.ak121m.memorydb.${REGION}.amazonaws.com:6379
-
-# ── AWS ────────────────────────────────────────────────────────────────────────
-: ${REGION:="${REGION}"}
 
 # Name of the Auto Scaling Group that manages the FTP backends.
 : ${ASG_NAME:="aeroftp-backend"}

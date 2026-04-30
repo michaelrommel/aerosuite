@@ -1,7 +1,7 @@
 {
 	"agent": {
 		"run_as_user": "root",
-		"region": "${REGION}"
+		"region": "eu-west-2"
 	},
 	"logs": {
 		"logs_collected": {

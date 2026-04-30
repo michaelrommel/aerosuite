@@ -1,4 +1,5 @@
 # Configuration for the aeroslot OpenRC service.
+export REGION=eu-west-2
 
 # Full path to the aeroslot binary
 export AEROSLOT_BINARY="/usr/local/bin/aeroslot"

@@ -103,7 +103,7 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 ///
 /// # Configuration
 /// The server requires the following environment variables:
-/// * `AWS_S3_REGION` - AWS region (e.g., "${REGION}")
+/// * `AWS_S3_REGION` - AWS region (e.g., "eu-west-1")
 /// * `AWS_S3_BUCKET` - S3 bucket name (e.g., "my-ftp-bucket")
 ///
 /// * `FTP_PASSIVE_PORT_START` - Start of the passive port range (e.g., 30000)
@@ -144,8 +144,8 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
 
     let region = std::env::var("AWS_S3_REGION")?;
     let bucket = std::env::var("AWS_S3_BUCKET")?;
-    let s3_endpoint = std::env::var("AWS_S3_ENDPOINT")
-        .unwrap_or_else(|_| "https://s3.amazonaws.com".to_string());
+    let s3_endpoint =
+        std::env::var("AWS_S3_ENDPOINT").unwrap_or_else(|_| "https://s3.amazonaws.com".to_string());
 
     let builder = S3::default()
         .customized_credential_load(Box::new(caching_provider))

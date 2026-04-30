@@ -114,7 +114,7 @@ pub struct Args {
 
     // ── Common ──────────────────────────────────────────────────────────────────────────────────────
     /// AWS region
-    #[arg(long, default_value = "${REGION}")]
+    #[arg(long, default_value = "eu-west-2")]
     region: String,
 }
 
@@ -213,11 +213,12 @@ async fn cmd_attach(
                     std::fs::create_dir_all(dir)
                         .with_context(|| format!("Failed to create directory {}", dir.display()))?;
                 }
-                std::fs::write(p, ip)
-                    .with_context(|| format!("Failed to write IP to {path}"))?;
+                std::fs::write(p, ip).with_context(|| format!("Failed to write IP to {path}"))?;
                 println!("   Private IP {ip} written to {path}");
             }
-            None => eprintln!("⚠️  --write-ip-file requested but no private IP was resolved for {eni_id}"),
+            None => eprintln!(
+                "⚠️  --write-ip-file requested but no private IP was resolved for {eni_id}"
+            ),
         }
     }
 

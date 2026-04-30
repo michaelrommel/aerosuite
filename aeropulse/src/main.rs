@@ -90,7 +90,9 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 #[derive(Parser)]
 #[command(name = "aeropulse")]
-#[command(about = "Generate VRRP keepalived include file and notify/track scripts from EC2 instance tags")]
+#[command(
+    about = "Generate VRRP keepalived include file and notify/track scripts from EC2 instance tags"
+)]
 struct Args {
     // ── Security ──────────────────────────────────────────────────────────────
     /// VRRP authentication password.  Must be identical on both nodes.
@@ -124,7 +126,6 @@ struct Args {
     /// (track_file blocks + virtual_server block, included by keepalived.conf)
     #[arg(long, default_value = "/etc/keepalived/backends.conf")]
     backends_out: PathBuf,
-
 
     // ── Interface names ───────────────────────────────────────────────────────
     /// OS interface name for the outside ENI (device index 0)
@@ -278,7 +279,7 @@ struct Args {
 
     // ── Common ────────────────────────────────────────────────────────────────
     /// AWS region
-    #[arg(long, default_value = "${REGION}")]
+    #[arg(long, default_value = "eu-west-2")]
     region: String,
 }
 
@@ -361,32 +362,46 @@ async fn main() -> Result<()> {
 
     println!("  Instance  : {}", data.instance_id);
     println!("  Role      : {}", data.role.as_str());
-    println!("  eth0      : {}  ({})", data.outside.primary_ip, data.outside.eni_id);
-    println!("  eth1      : {}  ({})", data.inside.primary_ip, data.inside.eni_id);
-    println!("  eth2      : {}  ({})  [HA sync]", data.sync.primary_ip, data.sync.eni_id);
-    println!("  Peer eth2 : {} (VRRP unicast + lvs_sync_daemon peer)", data.peer_sync_ip);
+    println!(
+        "  eth0      : {}  ({})",
+        data.outside.primary_ip, data.outside.eni_id
+    );
+    println!(
+        "  eth1      : {}  ({})",
+        data.inside.primary_ip, data.inside.eni_id
+    );
+    println!(
+        "  eth2      : {}  ({})  [HA sync]",
+        data.sync.primary_ip, data.sync.eni_id
+    );
+    println!(
+        "  Peer eth2 : {} (VRRP unicast + lvs_sync_daemon peer)",
+        data.peer_sync_ip
+    );
     println!("  VIP out   : {} (aeroftp-vip-outside)", data.vip_outside);
     println!("  VIP in    : {} (aeroftp-vip-inside)", data.vip_inside);
-    println!("  Slots     : {} × ({} – {})",
+    println!(
+        "  Slots     : {} × ({} – {})",
         data.slot_count,
         data.slot_network.ip_for_slot(0),
-        data.slot_network.ip_for_slot(data.slot_count - 1));
+        data.slot_network.ip_for_slot(data.slot_count - 1)
+    );
 
     // Render all content.
-    let vrrp_conf        = render_vrrp_conf(&args, &data);
-    let backends_conf    = render_backends_conf(&args, &data);
-    let notify_master    = render_notify_master(&args, &data);
-    let notify_backup    = render_notify_backup(&args, &data);
-    let chk_backends     = render_chk_backends(&args);
+    let vrrp_conf = render_vrrp_conf(&args, &data);
+    let backends_conf = render_backends_conf(&args, &data);
+    let notify_master = render_notify_master(&args, &data);
+    let notify_backup = render_notify_backup(&args, &data);
+    let chk_backends = render_chk_backends(&args);
     let chk_forward_path = render_chk_forward_path(&args, &data);
 
     // Write files.
-    write_file(&args.out,              &vrrp_conf,        0o640)?;
-    write_file(&args.backends_out,     &backends_conf,    0o640)?;
-    write_file(&args.notify_master_out, &notify_master,   0o750)?;
-    write_file(&args.notify_backup_out, &notify_backup,   0o750)?;
-    write_file(&args.chk_backends_out, &chk_backends,     0o750)?;
-    write_file(&args.chk_forward_out,  &chk_forward_path, 0o750)?;
+    write_file(&args.out, &vrrp_conf, 0o640)?;
+    write_file(&args.backends_out, &backends_conf, 0o640)?;
+    write_file(&args.notify_master_out, &notify_master, 0o750)?;
+    write_file(&args.notify_backup_out, &notify_backup, 0o750)?;
+    write_file(&args.chk_backends_out, &chk_backends, 0o750)?;
+    write_file(&args.chk_forward_out, &chk_forward_path, 0o750)?;
 
     println!("✅ Written:");
     println!("   {}", args.out.display());
@@ -396,12 +411,20 @@ async fn main() -> Result<()> {
     println!(
         "   {}  [track: {}]",
         args.chk_backends_out.display(),
-        if args.enable_track_backends { "ENABLED" } else { "generated, not yet active" }
+        if args.enable_track_backends {
+            "ENABLED"
+        } else {
+            "generated, not yet active"
+        }
     );
     println!(
         "   {}  [track: {}]",
         args.chk_forward_out.display(),
-        if args.enable_track_forward { "ENABLED" } else { "generated, not yet active" }
+        if args.enable_track_forward {
+            "ENABLED"
+        } else {
+            "generated, not yet active"
+        }
     );
     println!();
     println!("   keepalived.conf must include:");
@@ -440,8 +463,8 @@ async fn resolve_instance_data() -> Result<InstanceData> {
     }
 
     let outside = ifaces.remove(0);
-    let inside  = ifaces.remove(0);
-    let sync    = ifaces.remove(0);
+    let inside = ifaces.remove(0);
+    let sync = ifaces.remove(0);
 
     // Peer sync IP is the fixed eth2 IP of the peer, stored as an instance tag.
     // ASG tag name: keepalived-peer-sync
@@ -456,30 +479,24 @@ async fn resolve_instance_data() -> Result<InstanceData> {
         .await
         .context(
             "IMDS tag 'aeroftp-vip-outside' not found. \
-             Add it to the EC2 launch template (e.g. value: 172.16.29.100)."
+             Add it to the EC2 launch template (e.g. value: 172.16.29.100).",
         )?;
 
-    let vip_inside = fetch_imds_tag(&token, "aeroftp-vip-inside")
-        .await
-        .context(
-            "IMDS tag 'aeroftp-vip-inside' not found. \
-             Add it to the EC2 launch template (e.g. value: 172.16.32.10)."
-        )?;
+    let vip_inside = fetch_imds_tag(&token, "aeroftp-vip-inside").await.context(
+        "IMDS tag 'aeroftp-vip-inside' not found. \
+             Add it to the EC2 launch template (e.g. value: 172.16.32.10).",
+    )?;
 
     // ── Slot network (shared formula with aeroscale) ───────────────────────────
-    let slot_network = aerocore::SlotNetwork::from_imds()
-        .await
-        .context(
-            "Failed to resolve slot network from IMDS. \
-             Ensure the aeroftp-slot-offset tag and eth1 subnet CIDR are available."
-        )?;
+    let slot_network = aerocore::SlotNetwork::from_imds().await.context(
+        "Failed to resolve slot network from IMDS. \
+             Ensure the aeroftp-slot-offset tag and eth1 subnet CIDR are available.",
+    )?;
 
-    let slot_count_str = fetch_imds_tag(&token, "aeroftp-slot-count")
-        .await
-        .context(
-            "IMDS tag 'aeroftp-slot-count' not found. \
-             Add it to the load balancer launch template (e.g. value: 20)."
-        )?;
+    let slot_count_str = fetch_imds_tag(&token, "aeroftp-slot-count").await.context(
+        "IMDS tag 'aeroftp-slot-count' not found. \
+             Add it to the load balancer launch template (e.g. value: 20).",
+    )?;
     let slot_count: u32 = slot_count_str
         .trim()
         .parse()
@@ -556,7 +573,6 @@ async fn fetch_all_interfaces(token: &str) -> Result<Vec<IfaceInfo>> {
     Ok(interfaces)
 }
 
-
 // ── backends.conf rendering ───────────────────────────────────────────────────
 
 /// Generate `/etc/keepalived/backends.conf` — included by the static
@@ -574,8 +590,8 @@ async fn fetch_all_interfaces(token: &str) -> Result<Vec<IfaceInfo>> {
 /// This file is regenerated at every boot so changes to `aeroftp-slot-count`
 /// or the slot subnet are picked up without manual edits.
 fn render_backends_conf(args: &Args, data: &InstanceData) -> String {
-    let ts        = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-    let slot_0    = data.slot_network.ip_for_slot(0);
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let slot_0 = data.slot_network.ip_for_slot(0);
     let slot_last = data.slot_network.ip_for_slot(data.slot_count - 1);
 
     // ── track_file blocks ─────────────────────────────────────────────────────
@@ -641,17 +657,17 @@ virtual_server {vip_outside} 21 {{
 
 {real_servers}}}
 "#,
-        instance_id  = data.instance_id,
-        ts           = ts,
-        base         = data.slot_network.base,
-        offset       = data.slot_network.offset,
-        count        = data.slot_count,
-        slot_0       = slot_0,
-        slot_last    = slot_last,
-        track_files  = track_files,
-        vip_outside  = data.vip_outside,
-        sched        = args.lvs_sched,
-        timeout      = args.persistence_timeout,
+        instance_id = data.instance_id,
+        ts = ts,
+        base = data.slot_network.base,
+        offset = data.slot_network.offset,
+        count = data.slot_count,
+        slot_0 = slot_0,
+        slot_last = slot_last,
+        track_files = track_files,
+        vip_outside = data.vip_outside,
+        sched = args.lvs_sched,
+        timeout = args.persistence_timeout,
         real_servers = real_servers,
     )
 }
@@ -674,8 +690,8 @@ fn render_vrrp_conf(args: &Args, data: &InstanceData) -> String {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
 
     let vrrp_scripts_block = render_vrrp_scripts_definitions(args);
-    let lvs_sync_block     = render_lvs_sync_daemon(args);
-    let track_iface_block  = render_track_interface_block(args);
+    let lvs_sync_block = render_lvs_sync_daemon(args);
+    let track_iface_block = render_track_interface_block(args);
     let track_scripts_block = render_track_scripts_references(args);
     format!(
         r#"# ── VRRP — generated by keepalived-config ────────────────────────────────────
@@ -882,10 +898,9 @@ global_defs {{
 }}
 "#,
         iface_vxlan = args.iface_vxlan,
-        sync_id     = args.lvs_sync_id,
+        sync_id = args.lvs_sync_id,
     )
 }
-
 
 /// Render the `track_interface { … }` block inside a vrrp_instance.
 /// Tracks all three interfaces — if any link drops the sync group fails over
@@ -993,12 +1008,12 @@ log "Transitioning to MASTER on {instance_id} \u2014 claiming VIPs ..."
 log "Both VIPs claimed successfully."
 "#,
         instance_id = data.instance_id,
-        ts          = ts,
-        assign      = args.assign_bin.display(),
+        ts = ts,
+        assign = args.assign_bin.display(),
         vip_outside = data.vip_outside,
-        vip_inside  = data.vip_inside,
-        eni_inside  = data.inside.eni_id,
-        region      = args.region,
+        vip_inside = data.vip_inside,
+        eni_inside = data.inside.eni_id,
+        region = args.region,
     )
 }
 
@@ -1032,7 +1047,7 @@ logger -p local3.info -t keepalived-notify \
 exit 0
 "#,
         instance_id = data.instance_id,
-        ts          = ts,
+        ts = ts,
     )
 }
 // ── chk-backends.sh rendering ─────────────────────────────────────────────────

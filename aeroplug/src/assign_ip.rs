@@ -34,7 +34,7 @@ pub struct Args {
     allow_reassignment: bool,
 
     /// AWS region
-    #[arg(long, default_value = "${REGION}")]
+    #[arg(long, default_value = "eu-west-2")]
     region: String,
 }
 
@@ -68,7 +68,14 @@ async fn cmd_assign(args: &Args, eni_id: &str, creds: &AwsCredentials) -> Result
     if args.allow_reassignment {
         println!("  ⚡ AllowReassignment=true — will steal IP from current holder if necessary.");
     }
-    assign_secondary_ip(&args.region, creds, eni_id, &args.ip, args.allow_reassignment).await?;
+    assign_secondary_ip(
+        &args.region,
+        creds,
+        eni_id,
+        &args.ip,
+        args.allow_reassignment,
+    )
+    .await?;
     println!("✅ Assigned secondary IP {} to {eni_id}.", args.ip);
     println!("   Add the address in the OS with:");
     println!("     ip addr add {}/32 dev <interface>", args.ip);
@@ -113,7 +120,10 @@ async fn assign_secondary_ip(
     let reassign_str = allow_reassignment.to_string();
     println!("  Assigning {ip} to {eni_id} …");
     let xml = aws_query(
-        &host, "ec2", region, creds,
+        &host,
+        "ec2",
+        region,
+        creds,
         &[
             ("Action", "AssignPrivateIpAddresses"),
             ("Version", "2016-11-15"),
@@ -139,7 +149,10 @@ async fn unassign_secondary_ip(
     let host = format!("ec2.{region}.amazonaws.com");
     println!("  Unassigning {ip} from {eni_id} …");
     let xml = aws_query(
-        &host, "ec2", region, creds,
+        &host,
+        "ec2",
+        region,
+        creds,
         &[
             ("Action", "UnassignPrivateIpAddresses"),
             ("Version", "2016-11-15"),

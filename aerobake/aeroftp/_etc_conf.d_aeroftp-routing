@@ -1,4 +1,4 @@
-# Configuration for the AeroSlot OpenRC service.
+# Configuration for the AeroFTP routing service
 
 # What is the network prefix for the internal segment
 export BASE_IP="172.16.32"

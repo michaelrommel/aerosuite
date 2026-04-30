@@ -11,9 +11,9 @@ source "amazon-ebs" "alpine" {
   ami_name      = "aeroscale-alpine-{{timestamp}}"
   # we need t3 because the images use uefi
   instance_type = "t3.micro"
-  region        = "${REGION}"
-  vpc_id        = "${VPC_ID}"
-  subnet_id     = "${SUBNET_BACKEND_PUBLIC}"
+  region        = var.REGION
+  vpc_id        = var.VPC_ID
+  subnet_id     = var.SUBNET_BACKEND_PUBLIC
 
   # Use an existing Alpine Linux AMI as the base
   # Find the latest: https://www.alpinelinux.org/cloud/
@@ -49,7 +49,7 @@ source "amazon-ebs" "alpine" {
   # Use a pre-existing security group instead of Packer's temporary one.
   # The SG must allow inbound SSH (port 22) from your build host / bastion,
   # NOT from 0.0.0.0/0, to satisfy your policy.
-  security_group_ids      = ["${SECURITY_GROUP_FTP}"]
+  security_group_ids      = [var.SECURITY_GROUP_FTP]
 
   # Assign a public IP so the instance is reachable through the bastion.
   associate_public_ip_address = true

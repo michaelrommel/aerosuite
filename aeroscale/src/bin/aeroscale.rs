@@ -16,6 +16,9 @@ use clap::Parser;
 use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, warn};
 
+use aerocore::{
+    fetch_imds_credentials, fetch_imds_path, fetch_imds_token, redis_pool::build_redis_client,
+};
 use aeroscale::{
     cleanup::{self, CleanupState},
     listener,
@@ -23,10 +26,8 @@ use aeroscale::{
     scaler::{ScaleConfig, ScalerState},
     slot_network::SlotNetwork,
     snapshot::SystemSnapshot,
-    vrrp,
-    weight_sync,
+    vrrp, weight_sync,
 };
-use aerocore::{fetch_imds_credentials, fetch_imds_path, fetch_imds_token, redis_pool::build_redis_client};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ use aerocore::{fetch_imds_credentials, fetch_imds_path, fetch_imds_token, redis_
 #[command(about = "Backend management and autoscaling daemon for aeroftp")]
 struct Args {
     /// AWS region
-    #[arg(long, default_value = "${REGION}")]
+    #[arg(long, default_value = "eu-west-2")]
     region: String,
 
     /// Auto Scaling Group name for FTP backends
@@ -79,7 +80,6 @@ struct Args {
     tls_insecure: bool,
 
     // ── Slot network ──────────────────────────────────────────────────────────
-
     /// Override the backend slot subnet base IP.
     /// Default: read from the load balancer's eth1 subnet CIDR via IMDS.
     #[arg(long, value_name = "IP")]
@@ -91,7 +91,6 @@ struct Args {
     slot_offset: Option<u32>,
 
     // ── VRRP role detection ───────────────────────────────────────────────────
-
     /// Inside VIP address used to detect whether this node is the VRRP master.
     /// If this IP appears in `ip addr show`, this node is the master.
     /// If unset, master mode is always assumed (fine for single-node or dev).
@@ -99,7 +98,6 @@ struct Args {
     vip_inside: Option<Ipv4Addr>,
 
     // ── Weight state TTL ──────────────────────────────────────────────────────
-
     /// Maximum age (seconds) of Redis weight state before it is considered
     /// stale and recomputed from current lease state instead.
     /// Set to 0 to always recompute from leases (never restore from Redis).
@@ -115,7 +113,6 @@ struct Args {
     //   --slope-threshold-per-min 250 → 25
     //   --scale-up-cooldown-secs  12  → 120
     //   --drain-cooldown-secs     30  → 300
-
     /// Absolute average-sessions ceiling.  When crossed, scale-out fires
     /// immediately without waiting for hysteresis cycles (hard backstop).
     /// Default: 1200 (80 % of the 1500 passive-port ceiling).
@@ -255,8 +252,11 @@ async fn main() -> Result<()> {
             let resolved = async {
                 let token = fetch_imds_token().await?;
                 let s = fetch_imds_path(&token, "tags/instance/aeroftp-vip-inside").await?;
-                s.trim().parse::<Ipv4Addr>().map_err(|e| anyhow::anyhow!("invalid IP in aeroftp-vip-inside tag: {e}"))
-            }.await;
+                s.trim()
+                    .parse::<Ipv4Addr>()
+                    .map_err(|e| anyhow::anyhow!("invalid IP in aeroftp-vip-inside tag: {e}"))
+            }
+            .await;
             match resolved {
                 Ok(vip) => {
                     info!(%vip, "vip-inside: resolved from IMDS tag aeroftp-vip-inside");
@@ -284,12 +284,10 @@ async fn main() -> Result<()> {
         }
         _ => {
             info!("slot network: resolving from IMDS …");
-            SlotNetwork::from_imds()
-                .await
-                .context(
-                    "Failed to resolve slot network from IMDS. \
+            SlotNetwork::from_imds().await.context(
+                "Failed to resolve slot network from IMDS. \
                      Provide --slot-base and --slot-offset if not running on EC2.",
-                )?
+            )?
         }
     });
 
@@ -330,8 +328,10 @@ async fn main() -> Result<()> {
     )
     .await
     {
-        warn!("weight file init failed: {e:#} — weight files remain as draining; \
-               cleanup will fix them on the first pass");
+        warn!(
+            "weight file init failed: {e:#} — weight files remain as draining; \
+               cleanup will fix them on the first pass"
+        );
     }
 
     // ── Spawn background tasks ────────────────────────────────────────────────
@@ -356,21 +356,21 @@ async fn main() -> Result<()> {
 
     // ── Build scale config (immutable for the lifetime of the daemon) ─────────
     let scale_config = ScaleConfig {
-        hard_conn_threshold:          args.hard_conn_threshold,
-        slope_low_floor:              args.slope_low_floor,
+        hard_conn_threshold: args.hard_conn_threshold,
+        slope_low_floor: args.slope_low_floor,
         slope_threshold_conn_per_min: args.slope_threshold_per_min,
         bw_threshold_bps_per_backend: args.bw_threshold_bps_per_backend,
-        drain_threshold:              args.drain_threshold,
-        scale_up_hysteresis_cycles:   args.scale_up_hysteresis_cycles,
-        drain_hysteresis_cycles:      args.drain_hysteresis_cycles,
-        scale_up_cooldown_secs:       args.scale_up_cooldown_secs,
-        drain_cooldown_secs:          args.drain_cooldown_secs,
-        max_concurrent_draining:      args.max_concurrent_draining,
+        drain_threshold: args.drain_threshold,
+        scale_up_hysteresis_cycles: args.scale_up_hysteresis_cycles,
+        drain_hysteresis_cycles: args.drain_hysteresis_cycles,
+        scale_up_cooldown_secs: args.scale_up_cooldown_secs,
+        drain_cooldown_secs: args.drain_cooldown_secs,
+        max_concurrent_draining: args.max_concurrent_draining,
     };
 
     // Mutable scaler state: hysteresis counters and last-action timestamps.
     // Lives outside the loop so state is preserved between cycles.
-    let mut scaler_state  = ScalerState::default();
+    let mut scaler_state = ScalerState::default();
     let mut cleanup_state = CleanupState::default();
     // Last successfully read owner instance-id per slot.
     // Survives across snapshot cycles so that a transient Redis GET failure
@@ -404,10 +404,13 @@ async fn main() -> Result<()> {
         // Determine role each cycle — handles failover transparently.
         let is_master = match vip_inside {
             Some(vip) => vrrp::is_master(vip).await,
-            None      => true,
+            None => true,
         };
 
-        info!(is_master, "── cycle ─────────────────────────────────────────────────────────────");
+        info!(
+            is_master,
+            "── cycle ─────────────────────────────────────────────────────────────"
+        );
 
         // Backup: sync weight files from Redis before collecting the snapshot
         // so the local view is up-to-date with what the master decided.
@@ -456,9 +459,7 @@ async fn main() -> Result<()> {
 
                 // Master: persist weight state so backup can sync
                 if is_master {
-                    if let Err(e) =
-                        weight_sync::persist(&args.weights_dir, &mut redis_con).await
-                    {
+                    if let Err(e) = weight_sync::persist(&args.weights_dir, &mut redis_con).await {
                         warn!("weight state persist failed: {e:#}");
                     }
                 }

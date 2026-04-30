@@ -5,7 +5,7 @@ description="AeroFTP aeroscale — backend management and autoscaling daemon"
 # ── Defaults (override in /etc/conf.d/aeroscale) ─────────────────────────────
 : ${AEROSCALE_BINARY:="/usr/local/bin/aeroscale"}
 : ${REDIS_URL:="redis://127.0.0.1:6379"}
-: ${REGION:="${REGION}"}
+: ${REGION:="eu-west-1"}
 : ${ASG_NAME:="aeroftp-backend"}
 : ${WEIGHTS_DIR:="/etc/keepalived/weights"}
 : ${METRICS_PORT:="9090"}
