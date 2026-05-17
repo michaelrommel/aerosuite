@@ -3,9 +3,12 @@ use libunftp::options::{ActivePassiveMode, PassiveHost};
 use opendal::{layers::RetryLayer, services::S3, Operator};
 use std::time::Duration;
 
+use std::sync::Arc;
 use tracing::{debug, error, info, instrument};
+use crate::ftp::auth::AeroAuthenticator;
+use crate::ftp::provider::AeroUserDetailProvider;
 use crate::ftp::tracer::FtpDataTracer;
-use unftp_auth_jsonfile::JsonFileAuthenticator;
+use crate::ftp::user::AeroUser;
 use unftp_sbe_opendal::OpendalStorage;
 
 /// Type-safe wrapper for the passive port range used in FTP data connections.
@@ -185,8 +188,8 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
     // Wrap the operator with `OpendalStorage`
     let backend = OpendalStorage::new(op);
 
-    let authenticator = JsonFileAuthenticator::from_file("credentials.json")
-        .map_err(|e| anyhow::anyhow!("could not load credentials file: {}", e))?;
+    let authenticator = AeroAuthenticator::from_file("credentials.json")?;
+    let provider      = AeroUserDetailProvider::new();
 
     let passive_port_start = std::env::var("FTP_PASSIVE_PORT_START")?
         .parse::<u16>()
@@ -197,8 +200,11 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
     let passive_port_range = PassivePortRange::new(passive_port_start, passive_port_end)
         .context("Invalid passive port range configuration")?;
 
-    let server = libunftp::ServerBuilder::new(Box::new(move || backend.clone()))
-        .authenticator(std::sync::Arc::new(authenticator))
+    let server = libunftp::ServerBuilder::<_, AeroUser>::with_user_detail_provider(
+        Box::new(move || backend.clone()),
+        Arc::new(provider),
+    )
+        .authenticator(Arc::new(authenticator))
         .shutdown_indicator(async move {
             shutdown.recv().await.ok();
             debug!("shutting down FTP server");
