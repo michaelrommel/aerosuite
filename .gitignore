@@ -20,3 +20,11 @@ credentials.json
 
 # Interntionally omitted files
 libunftp_metadata.patch
+
+# Test run artefacts and session logs
+*.ndjson
+aeroftp_*.log
+tmp_ftp_root/
+logs/
+assets/
+pi-session-*.html

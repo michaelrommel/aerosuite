@@ -12,17 +12,41 @@ mod http;
 mod metrics;
 mod signal;
 
-use tracing::{error, info, warn};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{trace as sdktrace, Resource};
 use tokio::task::JoinSet;
-use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{error, info, warn};
+use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
 use http::FilterHandle;
 
+// ---------------------------------------------------------------------------
+// OTel shutdown guard
+// ---------------------------------------------------------------------------
+
+/// Holds the [`SdkTracerProvider`] for its lifetime.
+///
+/// On drop the provider is shut down gracefully, which flushes the
+/// in-flight batch exporter queue so no spans are lost on exit.
+struct OtelGuard {
+    provider: sdktrace::SdkTracerProvider,
+}
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        if let Err(e) = self.provider.shutdown() {
+            eprintln!("[aeroftp] OTel provider failed to shut down cleanly: {e}");
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Keep the handle alive for the duration of the program so the
-    // /config endpoint can update the log level at runtime.
-    let filter_handle = init_tracing()?;
+    // `_otel_guard` must stay alive until main returns so the OTel batch
+    // exporter has a chance to flush every span before the process exits.
+    // When OTEL_SDK_DISABLED=true it is None and the Drop is a no-op.
+    let (filter_handle, _otel_guard) = init_tracing()?;
 
     run(filter_handle).await?;
 
@@ -101,20 +125,83 @@ async fn main_task(filter_handle: FilterHandle) -> anyhow::Result<signal::ExitSi
     }
 }
 
-/// Initialise tracing and return a handle for adjusting the filter at runtime.
+/// Initialise tracing and return a handle for adjusting the filter at runtime,
+/// plus an optional [`OtelGuard`] that must be kept alive for the process lifetime.
 ///
-/// Bridges `log::` macros so existing call sites require no changes.
-/// `RUST_LOG` is honoured at startup (e.g. `RUST_LOG=aeroftp=debug`).
+/// **What happens here:**
+/// 1. A reloadable [`EnvFilter`] layer is built (honouring `RUST_LOG`).
+/// 2. Unless `OTEL_SDK_DISABLED=true`, an OTLP gRPC span exporter is configured,
+///    pointing at the Tempo endpoint supplied via `OTEL_EXPORTER_OTLP_ENDPOINT`
+///    (default: `http://aeromon.aerosuite:4317`).
+/// 3. A [`SdkTracerProvider`] with a background batch exporter is wired up.
+/// 4. [`tracing_opentelemetry::layer()`] bridges every `tracing` span /
+///    `#[instrument]` annotation into an OTEL span that flows to Tempo.
+/// 5. All layers - filter, fmt, otel (if enabled), and optionally tokio-console
+///    - are installed into the global subscriber in one shot.
 ///
-/// When the `tokio_console` feature is enabled, the Tokio Console layer is
-/// added automatically on `127.0.0.1:6669`.
-fn init_tracing() -> anyhow::Result<FilterHandle> {
+/// # Env vars
+/// * `RUST_LOG`                      - log / span filter (e.g. `aeroftp=debug`)
+/// * `OTEL_SDK_DISABLED`             - set to `true` to disable all OTEL export
+///                                     (no spans sent, no exporter threads created)
+/// * `OTEL_EXPORTER_OTLP_ENDPOINT`   - Tempo gRPC address
+///   (default: `http://aeromon.aerosuite:4317`)
+/// * `OTEL_SERVICE_NAME`             - overrides the default `"aeroftp"` label
+fn init_tracing() -> anyhow::Result<(FilterHandle, Option<OtelGuard>)> {
+    // ── 1. Reloadable env-filter (powers POST /config) ──────────────────────
     let filter = EnvFilter::from_default_env();
     let (filter_layer, handle) = reload::Layer::new(filter);
 
+    // ── 2. OTEL enabled? ─────────────────────────────────────────────────────
+    // The standard OpenTelemetry kill-switch: OTEL_SDK_DISABLED=true strips the
+    // entire export pipeline - no exporter threads, no batch queue, no tonic
+    // gRPC channel.  Set it in /etc/conf.d/aeroftp to run without OTEL.
+    let otel_disabled = std::env::var("OTEL_SDK_DISABLED")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    // ── 3. Optionally build the OTLP export pipeline ─────────────────────────
+    let (otel_layer, guard) = if otel_disabled {
+        eprintln!("[aeroftp] OTEL_SDK_DISABLED=true - OpenTelemetry export is off");
+        (None, None)
+    } else {
+        // Tempo lives in the aeromon task; its OTLP/gRPC port is 4317.
+        // On ECS (awsvpc) backends reach it by the aeromon task's private IP or
+        // an internal ECS Service Connect / Cloud Map DNS name.
+        let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .unwrap_or_else(|_| "http://aeromon.aerosuite:4317".to_string());
+
+        let service_name =
+            std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "aeroftp".to_string());
+
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&otlp_endpoint)
+            .build()?;
+
+        // `rt-tokio` spawns the batch worker on the existing Tokio runtime so we
+        // don't pay for a separate thread.
+        let provider = sdktrace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(Resource::builder().with_service_name(service_name).build())
+            .build();
+
+        opentelemetry::global::set_tracer_provider(provider.clone());
+        let tracer = provider.tracer("aeroftp");
+        let layer = tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_tracked_inactivity(false); // disable busy_ns/idle_ns on every span -
+                                             // those accumulate task scheduler idle time
+                                             // and make span durations misleading in Tempo
+        (Some(layer), Some(OtelGuard { provider }))
+    };
+
+    // ── 4. Assemble the full subscriber registry ─────────────────────────────
+    // Option<L> is a valid no-op Layer when otel_layer is None, so the
+    // subscriber type is the same regardless of the OTEL_SDK_DISABLED flag.
     let registry = tracing_subscriber::registry()
         .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer());
+        .with(tracing_subscriber::fmt::layer())
+        .with(otel_layer);
 
     #[cfg(not(feature = "tokio_console"))]
     registry.init();
@@ -140,5 +227,5 @@ fn init_tracing() -> anyhow::Result<FilterHandle> {
         registry.with(console_layer).init();
     }
 
-    Ok(handle)
+    Ok((handle, guard))
 }

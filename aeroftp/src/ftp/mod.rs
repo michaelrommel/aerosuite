@@ -7,5 +7,6 @@
 //! * Prometheus metrics integration
 
 mod server;
+mod tracer;
 
 pub use server::start_ftp;

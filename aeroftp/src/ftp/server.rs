@@ -3,7 +3,8 @@ use libunftp::options::{ActivePassiveMode, PassiveHost};
 use opendal::{layers::RetryLayer, services::S3, Operator};
 use std::time::Duration;
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
+use crate::ftp::tracer::FtpDataTracer;
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
 
@@ -138,43 +139,48 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 /// }
 /// ```
 #[must_use = "FTP server startup result indicates success or failure"]
+#[instrument(skip_all, name = "ftp.start",
+    fields(
+        ftp.address = %FTP_ADDRESS,
+        ftp.port    = %CONTROL_PORT,
+    )
+)]
 pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<()> {
     let region = std::env::var("AWS_S3_REGION")?;
     let bucket = std::env::var("AWS_S3_BUCKET")?;
     let s3_endpoint =
         std::env::var("AWS_S3_ENDPOINT").unwrap_or_else(|_| "https://s3.amazonaws.com".to_string());
 
-    let builder = S3::default()
-        .endpoint(&s3_endpoint)
-        .region(&region)
-        .bucket(&bucket)
-        .root("/");
-
-    // Initialize the Operator, with a RetryLayer to handle transient S3 errors.
-    //
-    // Root cause: AWS S3 closes idle HTTP keep-alive connections after ~60 s.
-    // hyper's connection pool does not detect this server-side close until a
-    // request is actually sent on the stale socket, at which point the PUT
-    // fails with "error sending request for url".  opendal already classifies
-    // this as Unexpected(temporary) — i.e. retryable — but without a layer
-    // acting on that classification the error propagates straight to libunftp
-    // which then sends "451 Local error" to the FTP client.
-    //
-    // RetryLayer intercepts Unexpected(temporary) errors and retries them with
-    // exponential back-off + jitter.  Because opendal's S3 writer buffers the
-    // entire body in memory before calling PutObject (for objects below the
-    // multipart threshold), the retry simply re-fires the HTTP request without
-    // needing to re-read data from the FTP data connection.  The first retry
-    // will always succeed: hyper discards the dead socket and opens a fresh one.
-    let op: Operator = Operator::new(builder)?
-        .layer(
-            RetryLayer::new()
-                .with_max_times(4)
-                .with_min_delay(Duration::from_millis(100))
-                .with_max_delay(Duration::from_secs(2))
-                .with_jitter(),
+    // ── child span: S3 backend initialisation ───────────────────────────────
+    // This short-lived span records bucket/region so you can immediately see
+    // which backend started and which S3 target it connects to.
+    let op = {
+        let _init_span = tracing::info_span!(
+            "ftp.s3_backend.init",
+            s3.region   = %region,
+            s3.bucket   = %bucket,
+            s3.endpoint = %s3_endpoint,
         )
-        .finish();
+        .entered();
+
+        let builder = S3::default()
+            .endpoint(&s3_endpoint)
+            .region(&region)
+            .bucket(&bucket)
+            .root("/");
+
+        Operator::new(builder)?
+            .layer(
+                RetryLayer::new()
+                    .with_max_times(4)
+                    .with_min_delay(Duration::from_millis(100))
+                    .with_max_delay(Duration::from_secs(2))
+                    .with_jitter(),
+            )
+            .finish()
+    }; // end ftp.s3_backend.init span
+
+    info!(s3.bucket = %bucket, s3.region = %region, "S3 backend initialised");
 
     // Wrap the operator with `OpendalStorage`
     let backend = OpendalStorage::new(op);
@@ -206,6 +212,7 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
         .passive_host(PassiveHost::FromConnection)
         .passive_ports(passive_port_range.get().0..=passive_port_range.get().1)
         .metrics()
+        .notify_data(FtpDataTracer)
         .build()?;
 
     tokio::spawn(async move {
