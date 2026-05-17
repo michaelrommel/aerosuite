@@ -15,6 +15,7 @@ mod signal;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{trace as sdktrace, Resource};
+use rustls::crypto::aws_lc_rs as rustls_provider;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
@@ -43,6 +44,14 @@ impl Drop for OtelGuard {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Both aws-lc-rs (via libunftp) and ring (via redis's tls-rustls feature)
+    // are compiled into the binary.  Rustls panics at runtime if it cannot
+    // auto-detect a single provider, so we pin it to aws-lc-rs explicitly
+    // before anything touches TLS.
+    rustls_provider::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // `_otel_guard` must stay alive until main returns so the OTel batch
     // exporter has a chance to flush every span before the process exits.
     // When OTEL_SDK_DISABLED=true it is None and the Drop is a no-op.

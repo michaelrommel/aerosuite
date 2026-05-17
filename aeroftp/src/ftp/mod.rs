@@ -10,6 +10,7 @@ mod server;
 mod tracer;
 pub mod auth;
 pub mod provider;
+pub mod storage;
 pub mod user;
 
 pub use server::start_ftp;

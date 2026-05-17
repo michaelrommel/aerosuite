@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, instrument};
 use crate::ftp::auth::AeroAuthenticator;
 use crate::ftp::provider::AeroUserDetailProvider;
+use crate::ftp::storage::AeroStorage;
 use crate::ftp::tracer::FtpDataTracer;
 use crate::ftp::user::AeroUser;
 use unftp_sbe_opendal::OpendalStorage;
@@ -185,11 +186,24 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
 
     info!(s3.bucket = %bucket, s3.region = %region, "S3 backend initialised");
 
-    // Wrap the operator with `OpendalStorage`
-    let backend = OpendalStorage::new(op);
+    // ── Redis / Valkey connection ───────────────────────────────────────────
+    let redis_url = std::env::var("REDIS_URL")
+        .context("REDIS_URL must be set (e.g. redis://127.0.0.1:6379)")?;
+    let redis_client = redis::Client::open(redis_url.as_str())
+        .context("invalid REDIS_URL")?;
+    let redis_conn = redis::aio::ConnectionManager::new(redis_client)
+            .await
+            .context("could not connect to Redis")?;
+    info!(url = %redis_url, "Redis connection manager ready");
+
+    // ── Storage backend ───────────────────────────────────────────────────────
+    // AeroStorage wraps OpendalStorage and adds S3 user metadata on STOR.
+    // Both share the same underlying operator / connection pool.
+    let inner   = OpendalStorage::new(op.clone());
+    let storage = AeroStorage::new(inner, op);
 
     let authenticator = AeroAuthenticator::from_file("credentials.json")?;
-    let provider      = AeroUserDetailProvider::new();
+    let provider      = AeroUserDetailProvider::new(redis_conn);
 
     let passive_port_start = std::env::var("FTP_PASSIVE_PORT_START")?
         .parse::<u16>()
@@ -201,7 +215,7 @@ pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> an
         .context("Invalid passive port range configuration")?;
 
     let server = libunftp::ServerBuilder::<_, AeroUser>::with_user_detail_provider(
-        Box::new(move || backend.clone()),
+        Box::new(move || storage.clone()),
         Arc::new(provider),
     )
         .authenticator(Arc::new(authenticator))
