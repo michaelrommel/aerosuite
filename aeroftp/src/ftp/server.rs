@@ -1,11 +1,8 @@
 use anyhow::Context;
 use libunftp::options::{ActivePassiveMode, PassiveHost};
 use opendal::{layers::RetryLayer, services::S3, Operator};
-use reqsign_aws_v4::Credential as AwsCredential;
-use reqsign_core::ProvideCredentialChain;
 use std::time::Duration;
 
-use crate::aws::CachingAwsCredentialLoader;
 use tracing::{debug, error, info};
 use unftp_auth_jsonfile::JsonFileAuthenticator;
 use unftp_sbe_opendal::OpendalStorage;
@@ -142,16 +139,12 @@ const DEFAULT_SHUTDOWN_GRACE_PERIOD_SECS: u64 = 10;
 /// ```
 #[must_use = "FTP server startup result indicates success or failure"]
 pub async fn start_ftp(mut shutdown: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<()> {
-    let caching_provider = CachingAwsCredentialLoader::default();
-    let credential_chain = ProvideCredentialChain::<AwsCredential>::new().push(caching_provider);
-
     let region = std::env::var("AWS_S3_REGION")?;
     let bucket = std::env::var("AWS_S3_BUCKET")?;
     let s3_endpoint =
         std::env::var("AWS_S3_ENDPOINT").unwrap_or_else(|_| "https://s3.amazonaws.com".to_string());
 
     let builder = S3::default()
-        .credential_provider_chain(credential_chain)
         .endpoint(&s3_endpoint)
         .region(&region)
         .bucket(&bucket)

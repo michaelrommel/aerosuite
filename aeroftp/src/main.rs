@@ -7,7 +7,6 @@
 //! - Automatically restarts on HUP signal, exits on INT/TERM
 //! - Uses cached AWS credentials from EC2 metadata, ECS, or EKS providers
 
-mod aws;
 mod ftp;
 mod http;
 mod metrics;
