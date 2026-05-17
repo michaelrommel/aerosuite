@@ -1,12 +1,12 @@
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Error};
-use chrono::{DateTime, TimeZone, Utc};
+use reqsign_aws_v4::Credential;
+use reqsign_core::ProvideCredential;
 use tracing::{debug, info, instrument, trace};
-use reqsign::AwsCredential;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -372,9 +372,10 @@ impl AwsCreds {
         if self.expiration.is_empty() {
             None
         } else {
-            DateTime::parse_from_rfc3339(&self.expiration)
+            self.expiration
+                .parse::<reqsign_core::time::Timestamp>()
                 .ok()
-                .map(Into::into)
+                .map(|t| t.as_system_time())
         }
     }
 
@@ -414,6 +415,7 @@ impl AwsCreds {
 ///
 /// # Thread Safety
 /// This type is fully thread-safe and can be shared across multiple async tasks.
+#[derive(Debug)]
 pub struct CachingAwsCredentialLoader {
     /// Shared mutable credentials accessible across async tasks within the crate.
     pub(crate) credentials: Arc<RwLock<AwsCreds>>,
@@ -679,47 +681,56 @@ impl CachingAwsCredentialLoader {
     }
 }
 
-#[async_trait::async_trait]
-impl reqsign::AwsCredentialLoad for CachingAwsCredentialLoader {
+impl ProvideCredential for CachingAwsCredentialLoader {
+    type Credential = Credential;
+
     /// Loads AWS credentials, using cache if valid or provisioning new ones.
     ///
     /// # Returns
-    /// * `Ok(Some(AwsCredential))` - Valid AWS credentials loaded from cache or fresh
+    /// * `Ok(Some(Credential))` - Valid AWS credentials loaded from cache or freshly fetched
     /// * `Ok(None)` - No credentials available (should not occur in normal operation)
+    ///
     /// # Errors
     /// Returns an error if credential provisioning fails due to network issues,
     /// invalid environment configuration, or metadata service unavailability.
-    async fn load_credential(&self, client: Client) -> anyhow::Result<Option<AwsCredential>> {
-        let credentials: AwsCreds;
-        match self.cache_check().await {
-            Some(c) => credentials = c,
+    async fn provide_credential(
+        &self,
+        _ctx: &reqsign_core::Context,
+    ) -> reqsign_core::Result<Option<Credential>> {
+        let credentials = match self.cache_check().await {
+            Some(c) => c,
             None => {
-                credentials = self.provision_credentials(client).await?;
+                let client = Client::new();
+                let c = self
+                    .provision_credentials(client)
+                    .await
+                    .map_err(|e| reqsign_core::Error::unexpected(e.to_string()))?;
                 let mut credential_cache = self.credentials.write().await;
-                *credential_cache = credentials.clone();
+                *credential_cache = c.clone();
                 // although at info level, the debug formatting is acceptable here, since
                 // the message will occur only roughly every six hours
                 info!(
                     "new credentials fetched and cached, expire at {:?}",
-                    credentials.expiry()
+                    c.expiry()
                 );
                 // the write lock is released after this scope ends
+                c
             }
-        }
-        let duration = credentials
-            .expiry()
-            .context("credentials have no valid expiration time")?
-            .duration_since(UNIX_EPOCH)
-            .context("systemTime is before UNIX_EPOCH")?;
-        let expiry = Utc
-            .timestamp_opt(duration.as_secs() as i64, duration.subsec_nanos())
-            .single();
-        // struct AwsCredential is what the reqsign crate expects
-        Ok(Some(AwsCredential {
+        };
+
+        // Parse the RFC3339 expiration string directly into reqsign_core::time::Timestamp.
+        // Returns None if the expiration field is empty or unparseable, which is safe —
+        // reqsign will treat a credential with no expiry as permanently valid.
+        let expires_in = credentials
+            .expiration()
+            .parse::<reqsign_core::time::Timestamp>()
+            .ok();
+
+        Ok(Some(Credential {
             access_key_id: credentials.access_key_id().as_str().to_string(),
             secret_access_key: credentials.secret_access_key().as_str().to_string(),
             session_token: Some(credentials.session_token().as_str().to_string()),
-            expires_in: expiry,
+            expires_in,
         }))
     }
 }
