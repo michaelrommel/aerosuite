@@ -31,7 +31,7 @@ rustls     = { version = "0.23", default-features = false, features = ["aws-lc-r
 
 # ── OpenTelemetry / tracing export ─────────────────────────────────────────────
 opentelemetry                      = { version = "0.31" }
-opentelemetry_sdk                  = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry_sdk                  = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp                 = { version = "0.31", features = ["grpc-tonic"] }
 opentelemetry-semantic-conventions = { version = "0.31" }
 tracing-opentelemetry              = "0.32"
