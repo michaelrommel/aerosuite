@@ -275,6 +275,7 @@ async fn cmd_takeover(
     let current_status = extract_scalar(item_xml, "status")
         .context("Could not extract ENI status")?
         .to_string();
+    let private_ip = extract_scalar(item_xml, "privateIpAddress").map(str::to_string);
 
     println!("   Resolved ENI: {eni_id}  (current status: {current_status})");
 
@@ -313,6 +314,25 @@ async fn cmd_takeover(
         "   Bring the interface up with:  ip link set eth{} up",
         args.device_index
     );
+
+    // Write the resolved private IP to a file if requested (same as --attach).
+    if let Some(ref path) = args.write_ip_file {
+        match private_ip {
+            Some(ref ip) => {
+                let p = std::path::Path::new(path);
+                if let Some(dir) = p.parent() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+                }
+                std::fs::write(p, ip)
+                    .with_context(|| format!("Failed to write IP to {path}"))?;
+                println!("   Private IP {ip} written to {path}");
+            }
+            None => eprintln!(
+                "warning: --write-ip-file requested but no private IP was resolved for {eni_id}"
+            ),
+        }
+    }
 
     Ok(())
 }
